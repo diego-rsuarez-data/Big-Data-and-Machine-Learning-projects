@@ -14,14 +14,6 @@ Projects explore various methods, from basic algorithms to advanced ensemble mod
 
 ## Projects
 
-1. **Bank Deposit Prediction** – Predict if a bank customer will subscribe to a term deposit.  
-   *Techniques:* KNN, Decision Trees, Random Forests, Gradient Boosting, Hyperparameter Tuning, SHAP interpretability.  
-   [Project Folder](./bank-deposit-prediction)
-
-2. *(Future projects will be listed here following the same structure)*
-
----
-
 Each project is **self-contained** with its own:
 - `notebooks/` – Jupyter notebooks with clean code and results
 - `data/` – Original datasets (no sensitive data)
