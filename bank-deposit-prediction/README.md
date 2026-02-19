@@ -5,11 +5,11 @@ The goal is to create a predictive model based on customer demographic, financia
 
 ## Project Structure
 
-bank-deposit-prediction/
-├─ data/ # Original dataset(s)
-├─ notebooks/ # Jupyter notebooks with all analyses and models
-├─ requirements.txt # Python dependencies
-└─ README.md # This file
+**bank-deposit-prediction/**  
+- `data/` — Original dataset(s)  
+- `notebooks/` — Jupyter notebooks with all analyses and models  
+- `requirements.txt` — Python dependencies  
+- `README.md` — This file
 
 ## Objective
 - Build a predictive model for term deposit subscription.
