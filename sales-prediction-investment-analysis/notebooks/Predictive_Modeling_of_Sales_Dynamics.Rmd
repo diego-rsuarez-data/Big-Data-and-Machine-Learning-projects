@@ -1,0 +1,1851 @@
+---
+title: "Second Assignment Predictive Modelling"
+author: "Alfonso Delgado Lara & Diego Rivera Suárez"
+date: "January 2026"
+output: 
+  html_document
+editor_options: 
+  markdown: 
+    wrap: sentence
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE)
+```
+
+# Introduction
+
+The primary objective of this project is to develop a robust predictive framework for weekly sales forecasting.
+Specifically, the analysis focuses on understanding the underlying drivers of sales performance, with a particular emphasis on determining the impact of various investment channels.
+By isolating the effect of these marketing and operational expenditures, the aim is not only to achieve high predictive accuracy but also to provide interpretable insights that can guide future resource allocation.
+
+The analysis is based on a structured dataset comprising weekly observations starting from January 2022.
+The target variable, `Sales`, represents the commercial performance to be predicted.
+The feature set includes a mix of operational metrics and diverse marketing investment streams.
+Operational variables such as `Stores`, `web_visits`, and `GBP` (likely an economic indicator or exchange rate context) provide the baseline for business activity.
+The core of the analysis, however, lies in the investment variables, which span multiple channels: digital platforms (`Affiliates_investment`, `Meta_investment`, `sea_brand`, `sea_other_investment`, `tiktok_investment`, `Database_investment`), traditional media (`TV_investment`, `Radio_investment`, `OOH_investment` for Out-of-Home advertising), and hybrid approaches (`TV_hbtv_investment`).
+
+To address the regression problem, the methodology combines techniques from both Statistical Learning and Machine Learning, acknowledging the trade-off between interpretability and predictive power.
+
+From the **Statistical Learning** perspective, the approach utilizes linear models and their regularized extensions (Ridge, Lasso, and Elastic Net).
+These methods are essential for handling potential multicollinearity among the investment variables—a common issue when multiple marketing channels fluctuate together.
+They also facilitate variable selection, allowing for a clear identification of which investment types have a statistically significant association with sales.
+
+Complementing this, **Machine Learning** algorithms are employed to capture non-linear relationships and complex interactions that linear models might miss.
+Techniques such as Random Forests or Gradient Boosting Machines (GBM) are explored to maximize prediction accuracy on unseen data.
+While these models are generally less transparent, they serve as a benchmark for performance and help validate whether the complexity of the data warrants non-linear approaches over simpler, interpretable ones.
+
+The subsequent sections detail the exploratory data analysis, the specific feature engineering steps taken to handle time-dependent patterns, and the comparative evaluation of these modeling strategies.
+
+# Exploratory Data Analysis
+
+## Loading up the data
+
+The raw data is imported directly from the provided Excel file.
+First, the date column is formatted to ensure the correct time order, which is essential for this type of analysis.
+The dataset is then split into two parts based on the availability of the target variable: the training set includes all observations where 'Sales' values are present, while the rows with missing sales are separated to serve as the test set for the final submission.
+
+```{r}
+library(tidyverse)
+library(lubridate)
+library(readxl)
+
+raw_data <- read_excel("Real_Dataset_HW2.xlsx")
+
+data_clean <- raw_data %>%
+  mutate(Monday_date = as.Date(Monday_date)) %>% 
+  arrange(Monday_date)
+  
+data_train <- data_clean %>%
+  filter(!is.na(Sales))
+
+data_test_submission <- data_clean %>%
+  filter(is.na(Sales))
+```
+
+After the dataset has been loaded, a quick summary of all the variables involved has been carried out to understand more closely the problem.
+
+```{r}
+summary(data_train)
+```
+
+## EDA
+
+Once the data loading process has been completed, an exploratory data analysis of all the variables present in the dataset will take place.
+This step is fundamental for constructing more sophisticated linear models, which are the core of the first part of the assignment.
+
+### Histogram of the `Sales` variable
+
+```{r}
+library(ggplot2)
+
+ggplot(data_train, aes(x = Sales)) +
+  geom_histogram(aes(y = ..density..), bins = 30, fill = "steelblue", alpha = 0.7) +
+  geom_density(color = "red", size = 1) +
+  labs(title = "Sales Distribution", x = "Sales", y = "Density") +
+  theme_minimal()
+```
+
+The visual inspection of the Sales histogram reveals a structure that approximates a normal distribution but exhibits **distinct deviations in the lower tail**.
+While the central mass of the data is unimodal and relatively symmetric, we observe a cluster of outliers with significantly low values on the left side.
+This values, however, may not be usual outliers, but rather correspond to certain weeks where the `Sales` fell for external reasons, such as the usual drop that tends to occur in January.
+
+**Modeling Implications:** Since these drops are probably structural and not random noise, treating them as simple outliers would be incorrect.
+Instead, this finding highlights the necessity of **feature engineering to capture seasonality** (e.g., introducing a 'Month' variable).
+Furthermore, the deviation from perfect normality supports the use of regularized regression methods (Ridge/Lasso), which are generally more robust to such distributional shifts than standard OLS.
+
+### Study of the correlations
+
+As a next step, a study of the correlation matrix will be carried out, to gain a higher insight on how the variables behave between each other and the complex interactions that will dictate the final outcome of the further models.
+
+```{r}
+library(corrplot)
+
+numeric_vars <- data_train %>% select_if(is.numeric)
+cor_matrix <- cor(numeric_vars, use = "complete.obs")
+
+corrplot(cor_matrix, method = "color", type = "upper", 
+         tl.col = "black", tl.cex = 0.6, 
+         addCoef.col = NULL, 
+         order = "hclust", 
+         title = "Heatmap of the correlations", mar = c(0,0,1,0))
+```
+
+The correlation matrix provides an overview of the linear dependencies between predictors.
+While we do not observe extreme multicollinearity (values close to ±1), several relevant patterns emerge:
+
+1.  **Sales Drivers:** The target variable (`Sales`) shows positive correlations with lower-funnel metrics such as `Web_visits` and `Sea_brand` (Search Engine Advertising).
+    This is expected, as these variables are closer to the conversion moment than broad media like TV.
+
+2.  **Media Synergies:** We observe moderate positive correlations among investment channels (e.g., between `Meta_investment` and `Search` or `TV`).
+    This reflects the company's omnichannel strategy: marketing budgets tend to increase across multiple channels simultaneously during campaign peaks.
+
+**Modeling Implications:** Although pairwise correlations appear moderate, the combined effect of multiple correlated marketing variables can still inflate the variance of standard OLS coefficients.
+This 'structural multicollinearity' reinforces the decision to use **regularization methods**.
+Specifically, **Elastic Net** would be ideal here: it can handle the group effect of correlated media channels (unlike Lasso, which might arbitrarily pick one and drop the others) while still performing feature selection.
+
+Since the main focus of this assignment falls on the `Sales` variable, a ranking of the most correlated variables with this target has also been done, in order to reject the least correlated ones for the elaboration of future linear models.
+
+```{r}
+# The numerical variables are selected for the analysis
+cor_data <- data_train %>%
+  dplyr::select(where(is.numeric)) %>%   
+  dplyr::select(-Sales)
+
+# Now, the correlations are calculated and arranged in descending order
+correlations <- cor(cor_data, data_train$Sales) %>%
+  as.data.frame() %>%
+  rownames_to_column(var = "Variable") %>%
+  rename(Correlation = V1) %>%
+  arrange(desc(Correlation)) 
+
+# Finally, the barplot is plotted
+ggplot(correlations, aes(x = reorder(Variable, Correlation), y = Correlation, fill = Correlation > 0)) +
+  geom_col() +
+  coord_flip() +
+  scale_fill_manual(values = c("TRUE" = "#2ecc71", "FALSE" = "#e74c3c"), guide = "none") +
+  labs(title = "Ranking of the most correlated variables with Sales",
+       x = "Variables",
+       y = "Pearson Correlation Coefficient") +
+  theme_minimal() +
+  theme(axis.text.y = element_text(face = "bold")) +
+  geom_text(aes(label = round(Correlation, 2)), hjust = -0.2, size = 3.5)
+```
+
+The correlation matrix provides an initial assessment of the linear dependencies between the candidate predictors and the target variable, `Sales`.
+While several investment channels exhibit a clear positive association with commercial performance, other features show a negligible relationship.
+
+To prioritize the most informative signals and reduce potential noise in the subsequent linear modeling phase, a threshold is established based on these coefficients.
+Specifically, any variable with a correlation below 0.1 (in absolute terms) is excluded from the feature set.
+This pre-selection step ensures that the baseline models focus only on drivers with at least a marginal statistical connection to the sales figures, preventing the inclusion of irrelevant data that could distort coefficient estimation.
+
+### Temporal Evolution of `Sales`
+
+Before applying any predictive algorithms, it is also essential to examine the temporal structure of the target variable.
+The following time series plot visualizes the trajectory of weekly sales throughout the observed period.
+This visual inspection allows for the immediate identification of potential trends, seasonal recurrences, or periods of high volatility, providing the necessary context to determine if time-dependent features—such as lags or calendar indicators—should be incorporated into the modeling strategy
+
+```{r}
+library(scales) 
+
+p_time <- ggplot(data_train, aes(x = Monday_date, y = Sales)) +
+  geom_line(color = "#2c3e50", size = 1) +
+  geom_point(color = "#e74c3c", size = 1.5, alpha = 0.6) +
+  geom_smooth(method = "loess", color = "blue", linetype = "dashed", se = FALSE, alpha = 0.5) +
+  scale_x_date(date_breaks = "3 months",    
+               date_labels = "%b-%y") + 
+  labs(title = "Evolution of Weekly Sales (2022 - 2024)",
+       x = "Date", y = "Sales Volume") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) 
+
+print(p_time)
+```
+
+The enhanced visualization of the weekly Sales evolution (Figure X) confirms that the data is **non-stationary** and exhibits strong, repetitive **seasonal patterns**:
+
+1.  **Q4 Peaks (High Season):** We observe sharp spikes in sales volume during the fourth quarter of each year (Oct-Dec).
+    This cyclical behavior is consistent with major retail events such as **Black Friday** and the **Christmas** campaign.
+
+2.  **Structural Troughs:** Conversely, the series consistently bottoms out in two specific periods:
+
+    -   **Post-Holiday Slump (Jan/Feb):** Immediate drops following the Q4 peak.
+
+    -   **Summer Seasonality (Aug):** A visible decline in activity during the summer holiday weeks.
+
+**Critical Implication for Ridge/Lasso Modeling:** Standard regression models (unlike ARIMA or Prophet) are 'time-blind'; they treat observations as independent rows.
+If we feed raw dates into Ridge/Lasso, they will fail to capture these cycles.
+Therefore, this visual analysis **mandates specific Feature Engineering**: we must decompose the date into categorical features (e.g., `Month`, `Week_Number`) to allow the linear model to 'see' and adjust for these seasonal effects.
+
+### Scatter plots of the rest of the variables
+
+Now, the focus is going be shifted from `Sales` to the other variables of this dataset that have not been studied as closely.
+Particularly, scatter plots of all them versus the target variable will be carried out just for understanding more deeply their influence on the response and potentially finding unexpected behaviors and patterns that may be crucial for the model elaboration stage.
+
+```{r}
+library(tidyverse)
+
+data_all_vars <- data_train %>%
+  select_if(is.numeric) %>%     
+  pivot_longer(
+    cols = -Sales,              
+    names_to = "Variable", 
+    values_to = "Valor"
+  )
+
+p_all <- ggplot(data_all_vars, aes(x = Valor, y = Sales)) +
+  geom_point(alpha = 0.5, color = "#2c3e50", size = 1.5) + 
+  geom_smooth(method = "lm", color = "red", se = FALSE, linetype = "solid") +
+  geom_smooth(method = "loess", color = "blue", se = FALSE, linetype = "dashed", alpha=0.5) +
+  facet_wrap(~Variable, scales = "free") + 
+  labs(title = "Relationship: Each Variable vs. Sales",
+       subtitle = "Red = Linear Model (OLS) | Blue = Real behavior (Non linear)",
+       y = "Sales", x = "Value of the variable") +
+  theme_bw() +
+  theme(strip.text = element_text(face = "bold", size = 9)) 
+print(p_all)
+```
+
+Visualizing the relationship between each predictor and the target variable reveals distinct categories of behavior, helping to distinguish between strong linear drivers and features that may require transformation or exclusion.
+
+**Linear Drivers** The most promising signals for linear regression appear in **`sea_brand`** and **`sea_other_investment`**.
+Both variables display a reasonably clear positive trend, suggesting that as investment in these search engine channels increases, sales tend to rise proportionally.
+**`web_visits`** and **`Meta_investment`** also show signs of a positive correlation; however, the latter contains noticeable outliers that might influence the slope of the regression line, warranting robust scaling or outlier treatment.
+
+**Low-Variance/Flat Relationships** A significant portion of the variables—specifically **`Stores`**, **`Affiliates_investment`**, **`tiktok_investment`**, and **`OOH_investment`**—exhibit a "flat" distribution.
+In these cases, the data points are dispersed horizontally with no discernible upward or downward slope, indicating that changes in these metrics have little to no immediate impact on sales volume.
+**`Database_investment`** falls into a similar category.
+While the data shows higher values during the first half of the year, this seasonality does not translate into a corresponding increase in sales, suggesting the variable acts more like background noise than a driver.
+
+**Complex and "Switch-Like" Behaviors** The traditional media channels present a more complex picture.
+**`TV_investment`** and **`Radio_investment`** appear somewhat chaotic; while there is a general sense that massive investment correlates with higher sales, the relationship is not strictly linear.
+This dispersion suggests that the *impact* of TV/Radio might depend on whether a campaign is active or not, rather than just the raw amount spent.
+
+Finally, **`TV_hbtv_investment`** reveals a structural anomaly.
+The plot is essentially composed of two distinct lines or clusters, behaving more like a categorical switch than a continuous variable.
+This observation strongly supports the hypothesis that the *presence* of investment (non-zero vs. zero) is more predictive than the magnitude itself.
+Consequently, converting this into a binary variable or using it to interact with other terms will likely yield better results than treating it as a standard continuous predictor.
+
+## Adding up the new variables
+
+Following the insights gained from the exploratory analysis, the dataset is augmented with specific features designed to capture patterns that raw values alone might miss.
+
+First, to address the temporal dynamics and potential seasonality observed in the sales evolution, a **`Month`** variable is extracted from the date field.
+This allows the model to account for recurring monthly cycles independent of specific investment levels.
+
+Second, based on the scatter plot analysis, several continuous investment variables are transformed into binary indicators.
+The clear "on/off" clustering seen in the Hybrid TV data motivates the creation of **`HBTV_Active`**.
+This binary flag tests the hypothesis that the mere presence of a campaign is more significant than the specific magnitude of the spend.
+Similarly, **`TikTok_Active`** and **`Radio_Active`** are introduced.
+Given the flat or chaotic distributions observed in these channels, simplifying them into a binary state (active vs. inactive) helps reduce noise and allows the models to focus on whether the channel is being utilized, rather than struggling with irregular expenditure fluctuations.
+
+```{r}
+data_full <- read_excel("Real_Dataset_HW2.xlsx") %>%
+  arrange(Monday_date)
+
+data_processed <- data_full %>%
+  mutate(
+    Month = month(Monday_date, label = TRUE, abbr = TRUE),
+    HBTV_Active   = ifelse(TV_hbtv_investment > 0, 1, 0),
+    TikTok_Active = ifelse(tiktok_investment > 0, 1, 0),
+    Radio_Active  = ifelse(Radio_investment > 0, 1, 0)
+    )
+
+final_train <- data_processed %>% filter(!is.na(Sales))
+final_test  <- data_processed %>% filter(is.na(Sales))
+
+```
+
+# Statistical Learning Methods
+
+In the first phase of the modeling process, the focus is placed on Statistical Learning methods.
+These techniques are prioritized for their transparency, allowing for a direct interpretation of how each investment channel influences weekly sales—a critical requirement for this study.
+
+The baseline approach is Ordinary Least Squares (OLS).
+However, given the potential for multicollinearity among the various marketing investments and the risk of overfitting, standard OLS is complemented by feature selection strategies to identify the most significant subset of predictors.
+
+To further enhance model robustness and stability, penalized regression techniques are introduced.
+Ridge regression is employed to handle correlated predictors by shrinking coefficients, while Lasso is utilized for its ability to perform automatic variable selection, effectively zeroing out less relevant features.
+Finally, Elastic Net is applied to combine the strengths of both, offering a flexible middle ground that encourages group selection among correlated variables.
+This progression ensures that the final model balances predictive accuracy with structural simplicity.
+
+## Ordinary Least Squares (Linear Model)
+
+Prior to estimating the standard OLS model, it is crucial to identify potential interactions between predictors.
+In marketing contexts, variables often work synergistically—meaning the combined effect of two investment channels may exceed the sum of their individual contributions.
+Rather than selecting these interactions arbitrarily based on intuition, a data-driven strategy is implemented using a decision tree.
+
+By fitting a shallow regression tree to the data, the hierarchical structure of the splits reveals natural dependencies between features.
+If a node defined by one variable is immediately followed by a split on another, it suggests a conditional relationship.
+These structural patterns are then extracted and encoded as interaction terms in the linear equation, ensuring that any added complexity is grounded in statistical evidence rather than guesswork.
+
+```{r}
+library(rpart)
+library(rpart.plot)
+
+vars_good <- c("Sales", "sea_brand", "sea_other_investment", "Meta_investment", 
+                 "web_visits", "GBP", "TV_investment", "Radio_investment", 
+                 "Radio_Active", "HBTV_Active")
+
+data_arbol <- final_train %>% dplyr::select(all_of(vars_good))
+
+tree <- rpart(Sales ~ ., data = data_arbol, method = "anova", control = rpart.control(cp = 0.01))
+
+rpart.plot(tree, 
+           type = 2, 
+           extra = 1, 
+           under = TRUE, 
+           faclen = 0, 
+           main = "Regression Tree for Finding the Best Interactions",
+           box.palette = "Blues")
+```
+
+The structure of the regression tree identified `GBP` not just as a standalone predictor, but as a modulating factor that influences the performance of other marketing channels.
+Consequently, two key interaction terms were extracted and included in the linear model specification.
+
+The first interaction, **`HBTV_Active * GBP`**, suggests that the impact of activating a Hybrid TV campaign is dependent on the macro-economic context represented by the GBP index.
+This implies that the mere presence of the campaign (on vs. off) yields different sales results depending on the fluctuation of the currency or economic indicator, potentially reflecting changes in consumer purchasing power or market conditions during the campaign period.
+
+The second interaction, **`(Radio_investment : Radio_Active) * GBP`**, captures a similar dynamic but focuses on the magnitude of the spend.
+Here, the efficiency of every unit of currency invested in Radio is conditional on the GBP level.
+This interaction allows the model to adjust the expected return on investment (ROI) for Radio advertising dynamically, acknowledging that consumer responsiveness to radio ads may shift as the broader economic environment changes.
+
+With the feature set defined—comprising the strongest univariate drivers identified in the correlation analysis and the interaction terms derived from the tree structure—the analysis proceeds to the estimation of the Ordinary Least Squares (OLS) model.
+
+To ensure a rigorous assessment of predictive performance, a 10-fold Cross-Validation strategy is adopted.
+Given the relatively modest size of the dataset, relying on a single validation split could introduce significant variance in the error estimation.
+The 10-fold approach maximizes the utility of the available data, providing a robust and realistic estimate of the Mean Absolute Error (MAE) that can be expected on unseen data.
+
+Following this validation phase, the model is re-fitted using the complete training dataset.
+This final step is crucial for interpretation; by utilizing the full historical history, the model yields the most precise coefficient estimates possible, allowing for a reliable quantification of the marginal impact of each investment channel.
+
+```{r}
+library(caret)
+
+ctrl <- trainControl(method = "repeatedcv", number = 10, repeats= 3)
+
+model_formula <- Sales ~ Meta_investment + sea_brand + sea_other_investment + web_visits + HBTV_Active*GBP + TV_investment*GBP + (Radio_investment:Radio_Active)*GBP
+
+model_validated <- train(
+  model_formula, 
+  data = final_train,
+  method = "lm",          
+  trControl = ctrl,
+  metric = "MAE"          
+)
+
+print(model_validated$results) 
+
+
+print(summary(model_validated$finalModel))
+```
+
+An examination of the regression summary reveals significant limitations in the initial specification.
+While variables such as `GBP`, `Meta_investment`, and `sea_brand` display statistical significance, a large portion of the feature set fails to contribute meaningfully to the model.
+
+Specifically, the interaction terms derived from the tree structure do not hold up under statistical scrutiny; `HBTV_Active:GBP` and `GBP:TV_investment` exhibit very high p-values (0.47 and 0.80, respectively), suggesting that the economic modulation of these channels is not statistically distinct in this linear framework.
+Furthermore, standalone predictors like `web_visits` (p ≈ 0.71) and the main effect of `TV_investment` (p ≈ 0.68) show virtually no explanatory power.
+
+Beyond individual coefficients, the model diagnostics indicate a clear case of overfitting.
+A sharp decline is observed when comparing the $R^2$ obtained on the training set versus the $R^2$ derived from cross-validation.
+This discrepancy suggests that the model is capturing noise within the training data rather than generalizing well to new observations.
+The added complexity of the interactions appears to increase variance without providing a sufficient reduction in bias.
+
+### Model Simplification
+
+To address these issues and improve generalization, a refined, parsimonious model is proposed.
+This new specification eliminates the noise-inducing interactions and removes the weak `web_visits` predictor.
+The focus shifts to a cleaner additive structure that retains the core investment drivers and the essential economic context provided by `GBP`.
+
+The revised formula is defined as follows:
+
+```{r}
+formula_clean <- Sales ~ Meta_investment + 
+                         sea_brand + 
+                         sea_other_investment + 
+                         GBP + 
+                         HBTV_Active + 
+                         TV_investment + 
+                         Radio_investment:Radio_Active 
+
+control_settings <- trainControl(method = "cv", number = 10)
+
+model_v2 <- train(
+  formula_clean, 
+  data = final_train,
+  method = "lm",
+  trControl = ctrl,
+  metric = "MAE"
+)
+
+print(model_v2$results)
+
+print(summary(model_v2$finalModel))
+```
+
+The transition to a more parsimonious specification has notably improved the stability of the estimates.
+By stripping away the statistically insignificant interaction terms, the drivers with genuine predictive power have emerged more clearly.
+**`GBP`** and **`HBTV_Active`** now display very strong statistical significance ($p < 0.001$), confirming that the economic context and the presence of Hybrid TV campaigns are fundamental pillars of sales performance.
+**`Meta_investment`** also remains a solid predictor.
+
+However, the model is not yet perfect.
+Variables such as **`sea_other_investment`** and the interaction term for **`Radio`** continue to show high p-values, suggesting they contribute little to the model's explanatory power in their current form.
+Despite these lingering inefficiencies, this simplified equation serves as a superior baseline compared to the initial overfitting model.
+It will be retained as the working benchmark while further improvements are explored.
+The presence of these weak predictors explicitly justifies the next phase of the study, where advanced variable selection techniques—such as Lasso or Elastic Net—will be employed to mathematically determine the optimal feature subset.
+
+Before proceeding to those advanced methods, it is imperative to verify the statistical validity of the current OLS model.
+To do so, the four standard diagnostic plots are examined to check for violations of the Gauss-Markov assumptions: linearity, normality of errors, homoscedasticity (constant variance), and the presence of influential outliers.
+
+```{r}
+model_final <- model_v2$finalModel
+par(mfrow = c(2, 2))
+plot(model_final)
+par(mfrow = c(1, 1))
+```
+
+## Forward Regression
+
+To complement the manual simplification process, an automated feature selection technique known as **Forward Stepwise Regression** is implemented.
+This method creates a sequence of models by starting with an empty set and iteratively adding the single predictor that provides the greatest improvement to the model's fit at each step.
+
+For this analysis, the algorithm is provided with the full scope of variables from the initial complex model, including all interaction terms.
+Instead of allowing the procedure to grow the model indefinitely, a specific complexity constraint is applied: the search is limited to identifying optimal subsets ranging from 2 to 8 predictors.
+The final selection is not based solely on in-sample fit statistics (like AIC) but is determined by the configuration that yields the lowest **Mean Absolute Error (MAE)**.
+This approach ensures that the chosen model achieves the best balance between simplicity and predictive accuracy on unseen data.
+
+```{r}
+library(caret)
+library(leaps) 
+ModelF <- Sales ~ Meta_investment + sea_brand + sea_other_investment + 
+                  GBP + HBTV_Active + TV_investment + 
+                  Radio_investment:Radio_Active + Radio_Active + web_visits
+
+for_tune <- train(ModelF, 
+                  data = final_train, 
+                  method = "leapForward", 
+                  preProc = c('scale', 'center'), 
+                  tuneGrid = expand.grid(nvmax = 2:8),
+                  trControl = ctrl,
+                  metric = "MAE")
+
+print(for_tune)
+plot(for_tune)
+```
+
+As it can be seen, the minimum MAE is reached for the best model using three variables.
+Those variables are:
+
+```{r}
+model_intern <- for_tune$finalModel
+
+vars_win <- summary(model_intern)$which[3, ]
+
+print(names(which(vars_win)))
+```
+
+Finally, the model with these three variables will be trained with the whole training partition:
+
+```{r}
+formula_champion <- Sales ~ Meta_investment + GBP + HBTV_Active
+model_definitive <- lm(formula_champion, data = final_train)
+summary(model_definitive)
+```
+
+```{r}
+par(mfrow = c(2,2))
+plot(model_definitive)
+par(mfrow=c(1,1))
+```
+
+## Backwards Regression
+
+To ensure the feature selection process is not biased by the direction of the search, the analysis also incorporates **Backward Stepwise Regression**.
+While the Forward approach builds the model from the ground up, this technique adopts the opposite strategy: 'pruning' rather than 'growing'.
+
+The algorithm initializes with the maximal model specification—including every available predictor and the interaction terms previously identified.
+From this complex starting point, it iteratively discards the variable that contributes the least to the model's performance (statistically the least significant).
+By stripping away the "dead weight" one by one, the method aims to distill the equation down to its most impactful components.
+This serves as a critical cross-check: if both Forward and Backward methods converge on a similar set of variables, it provides high confidence that those features are indeed the true drivers of sales.
+
+```{r}
+Model_Full <- Sales ~ Meta_investment + sea_brand + sea_other_investment + 
+                      GBP + HBTV_Active + TV_investment + 
+                      Radio_investment:Radio_Active + web_visits
+
+back_tune <- train(Model_Full, 
+                   data = final_train, 
+                   method = "leapBackward", 
+                   preProc = c('scale', 'center'), 
+                   tuneGrid = expand.grid(nvmax = 2:8),
+                   trControl = ctrl,
+                   metric = "MAE")
+
+print(back_tune)
+plot(back_tune)
+
+n_optim <- back_tune$bestTune$nvmax
+
+cat(paste("\n The best model has", n_optim, "variables.\n"))
+cat("--- THE OPTIMAL VARIABLES ARE: ---\n")
+
+# Sacamos los nombres exactos
+vars_backward <- summary(back_tune$finalModel)$which[n_optim, ]
+print(names(which(vars_backward)))
+```
+
+The application of Backward Stepwise Regression yielded a model specification identical to that derived from the Forward Selection process.
+This convergence is a highly positive result, serving as a strong validation of the feature set.
+
+Stepwise algorithms are "greedy" by nature, meaning they make the optimal local decision at each step.
+In many datasets, this can lead to different final models depending on whether the search starts with no variables (Forward) or all variables (Backward), as the algorithms might get trapped in different local optima.
+The fact that both approaches arrived at the exact same subset of predictors suggests that the signal provided by these variables is robust and stable.
+It indicates that this specific combination of investment channels and economic indicators represents the most effective linear structure for explaining sales variance, regardless of the search direction employed.
+
+## Stepwise Regression
+
+To conclude the iterative selection process, a **Bidirectional Stepwise Regression** is performed.
+Unlike the strictly directional Forward or Backward approaches, which are confined to either adding or removing variables exclusively, this hybrid method evaluates the model dynamically in both directions.
+
+At each step of the algorithm, two actions are considered simultaneously: adding the most informative missing predictor and removing any existing variable that has lost its statistical significance due to the inclusion of new features.
+This flexibility allows the model to self-correct; a variable that appeared important in an early iteration can be discarded later if a more effective combination of predictors renders it redundant.
+This process continues until no step can further minimize the information criterion (AIC), ensuring the final subset is both concise and statistically robust.
+
+```{r}
+Model_Full <- Sales ~ Meta_investment + sea_brand + sea_other_investment + 
+                      GBP + HBTV_Active + TV_investment + 
+                      Radio_investment:Radio_Active + web_visits
+set.seed(123) 
+step_tune <- train(Model_Full, 
+                   data = final_train, 
+                   method = "leapSeq",  
+                   preProc = c('scale', 'center'), 
+                   tuneGrid = expand.grid(nvmax = 2:9), 
+                   trControl = ctrl,
+                   metric = "MAE")
+print(step_tune)
+plot(step_tune)
+n_optimo <- step_tune$bestTune$nvmax
+
+cat(paste("\n The best model has", n_optimo, "variables.\n"))
+cat("--- THE OPTIMAL VARIABLES ARE: ---\n")
+
+vars_stepwise <- summary(step_tune$finalModel)$which[n_optimo, ]
+print(names(which(vars_stepwise)))
+```
+
+```{r}
+formula_champion <- Sales ~ Meta_investment + GBP + HBTV_Active + sea_brand + sea_other_investment
+
+model_definitive <- lm(formula_champion, data = final_train)
+
+summary(model_definitive)
+```
+
+Unexpectedly, the Bidirectional Stepwise Regression yielded a model specification that differs significantly from the consensus reached by the Forward and Backward methods.
+Furthermore, when evaluating the performance of this new subset, the Mean Absolute Error (MAE) appears to deteriorate rather than improve, particularly in comparison to the parsimonious 3-variable structure identified previously.
+
+This discrepancy can be primarily attributed to the differing optimization criteria.
+While the manual selection in the previous steps was strictly guided by minimizing MAE (predictive error), standard stepwise algorithms typically optimize the Akaike Information Criterion (AIC).
+AIC prioritizes the likelihood of the model and penalizes complexity, but it does not always align perfectly with mean absolute error, especially in datasets with potential outliers or noise.
+The algorithm likely converged on a local optimum that satisfies the statistical properties of AIC but fails to generalize as effectively in terms of raw prediction accuracy.
+
+Given that the Forward and Backward approaches converged on an identical, lower-error solution, this result is prioritized over the Bidirectional output.
+The stability of the 3-variable model suggests it captures the true signal more robustly, whereas the Stepwise result appears to have drifted into a less efficient configuration due to the sensitivity of the AIC metric.
+Therefore, the analysis will proceed using the variables identified in the previous section.
+
+## Exhaustive Regression
+
+While stepwise algorithms are efficient, they suffer from a known limitation: they are "greedy" approaches that make locally optimal decisions at each step, potentially missing the global optimum.
+Recognizing that the previous models might have overlooked complex dependencies, a more computationally intensive strategy known as **Exhaustive Regression** (or Best Subset Selection) was implemented.
+
+To leave no stone unturned, the feature space was significantly expanded.
+The model formula was defined to include not only the main investment variables but also **all possible pairwise interactions** (indicated by the `^2` expansion).
+This created a vast pool of candidate predictors, allowing the algorithm to test for synergies between every possible pair of channels (e.g., whether `Radio` works better when `TV` is active, or if `Meta` investment depends on `GBP`).
+
+From this expanded universe, the algorithm evaluated every conceivable combination of predictors to identify the strictly best models containing 2, 3, and 4 variables.
+This method bypasses the sequential logic of stepwise selection, ensuring that the final candidate is not just "good enough," but the mathematically optimal subset for the given model size.
+
+```{r}
+
+formula_interact <- Sales ~ (Meta_investment + sea_brand+sea_other_investment + 
+                                  GBP + HBTV_Active + TV_investment + 
+                                  Radio_investment + Radio_Active + web_visits)^2
+
+matriz_diseño <- model.matrix(formula_interact, data = final_train)[,-1] #
+y_real <- final_train$Sales
+
+model_exhaustive <- regsubsets(x = matriz_diseño, 
+                                y = y_real, 
+                                method = "exhaustive", 
+                                nvmax = 6,     
+                                really.big = T) 
+
+resumen_exh <- summary(model_exhaustive)
+
+print(resumen_exh$outmat)
+```
+
+Once the best variables have been selected for each size, a comparison of the MAE of all of these models will be carried out for determining which of these models is the optimal one.
+In fact, they will be compared to the actual best model with three variables obtained at the previous stages.
+
+```{r}
+set.seed(123)
+
+# The best model obtained from forward regression
+model_simple <- train(Sales ~ Meta_investment + GBP + HBTV_Active,
+                       data = final_train,
+                       method = "lm",
+                       trControl = ctrl,
+                       metric = "MAE")
+
+# The best model with three variables:
+model_interact_3 <- train(Sales ~ Meta_investment + GBP + HBTV_Active:web_visits,
+                              data = final_train,
+                              method = "lm",
+                              trControl = ctrl,
+                              metric = "MAE")
+
+# The best model with four variables
+model_interact_4 <- train(Sales ~ GBP + Meta_investment:web_visits + 
+                              sea_other_investment:HBTV_Active + 
+                              sea_other_investment:web_visits,
+                              data = final_train,
+                              method = "lm",
+                              trControl = ctrl,
+                              metric = "MAE")
+
+cat("Original model:      ", min(model_simple$results$MAE), "\n")
+cat("Best model with three variables:   ", min(model_interact_3$results$MAE), "\n")
+cat("Best model with four variables:      ", min(model_interact_4$results$MAE), "\n")
+```
+
+The results of the model comparison (the "Duel of Models") provide a clear path forward.
+While the **Original Model** established a decent baseline with an MAE of **333.18**, and the **Interaction Model (3 variables)** actually performed worse (340.46) likely due to introducing unhelpful noise, the **Complex Model (4 variables)** emerged as the superior predictor.
+
+With an MAE of **330.36**, this specification achieves the lowest error rate among all candidates tested.
+This reduction in error implies that the specific combination of variables and interactions in "Row 4" captures the nuances of the sales data more effectively than the strictly linear or simpler interactive approaches.
+
+Consequently, we select this 4-variable configuration as our champion model.
+We will now proceed to fit this specific formula to the full training dataset to examine the coefficients, understand the direction of the relationships, and verify the statistical significance of the selected features.
+
+```{r}
+formula_model_4 <- Sales ~ GBP + 
+                            Meta_investment:web_visits + 
+                            sea_other_investment:HBTV_Active + 
+                            sea_other_investment:web_visits
+
+model_4_final <- lm(formula_model_4, data = final_train)
+
+summary(model_4_final)
+
+valid_m4 <- train(formula_model_4, data = final_train, method = "lm",
+                  trControl = ctrl, metric = "MAE")
+cat("\nMAE (Cross-Validation):", min(valid_m4$results$MAE), "\n")
+```
+
+While the 4-variable model yielded a lower MAE than the simpler baselines, accepting it as the final solution carries a risk of underfitting.
+There is a valid concern that by artificially capping the search space at a low number of predictors, we might be excluding slightly more complex configurations that could offer significantly better predictive power.
+
+To address this "fear of missing out" on a superior model, the Exhaustive Regression (Best Subset) strategy is re-deployed with an expanded scope.
+The algorithm is now tasked with evaluating all possible combinations to identify the mathematically optimal subsets containing **5, 6, and 7 variables**.
+This step is critical to determine if the marginal gain in accuracy from adding more predictors outweighs the cost of added complexity, ensuring that the final model selection is based on a comprehensive exploration of the feature space rather than an arbitrary limit.
+
+```{r}
+formula_base <- Sales ~ (Meta_investment + sea_brand + sea_other_investment + 
+                         GBP + HBTV_Active + TV_investment + 
+                         Radio_investment + Radio_Active + web_visits)^2
+
+matrix_d<- model.matrix(formula_base, data = final_train)[,-1]
+y_real <- final_train$Sales
+
+search_full <- regsubsets(x = matrix_d, y = y_real, 
+                            method = "exhaustive", 
+                            nvmax = 8, 
+                            really.big = T)
+
+set.seed(123) 
+results_mae <- list()
+
+for (k in 5:7) {
+  coef_k <- coef(search_full, id = k)
+  name_vars <- names(coef_k)[-1] 
+  
+  formula_str <- paste("Sales ~", paste(name_vars, collapse = " + "))
+  formula_k <- as.formula(formula_str)
+  model_k <- train(formula_k, data = final_train, method = "lm", 
+                    trControl = ctrl, metric = "MAE")
+  
+  mae_k <- min(model_k$results$MAE)
+  results_mae[[paste0("Modelo_", k)]] <- mae_k
+ 
+  cat("\nBEST MODEL WITH", k, "VARIABLES:")
+  cat("\nVariables:", paste(name_vars, collapse = "  |  "))
+  cat("\nMAE (CV):", mae_k)
+}
+
+```
+
+The decision to extend the exhaustive search beyond the initial limit was decisively vindicated.
+While the models with 5 and 6 variables showed an incremental improvement (hovering around an MAE of **324**), the introduction of a 7th term triggered a substantial breakthrough in predictive accuracy.
+
+The 7-variable model achieved an MAE of **308.55**, dropping the error by nearly **20 points** compared to the next best candidate.
+This is a "landslide victory" in statistical terms.
+The composition of this champion model is telling: it is almost entirely dominated by **interaction terms** (e.g., `Meta:TV`, `HBTV:Web`, `TV:Web`).
+This strongly reinforces the hypothesis that the true drivers of sales in this dataset are not the channels in isolation, but the **synergies** between them (e.g., how TV creates a lift in Web visits, or how Meta complements TV investment).
+
+Given this overwhelming performance advantage, we will proceed with this 7-variable specification as our definitive OLS champion.
+We will now fit this formula to the **entire training dataset** to extract the specific coefficients.
+This will allow us to interpret *how* these complex interactions are driving sales (positive vs. negative synergies) before moving on to the final stage of Regularized Regression.
+
+```{r}
+formula_marvelous <- Sales ~ GBP + 
+                             Meta_investment:TV_investment + 
+                             Meta_investment:web_visits + 
+                             sea_other_investment:GBP + 
+                             sea_other_investment:TV_investment + 
+                             HBTV_Active:web_visits + 
+                             TV_investment:web_visits
+
+model_7_final <- lm(formula_marvelous, data = final_train)
+
+summary(model_7_final)
+
+set.seed(123)
+valid_m7 <- train(formula_marvelous, data = final_train, method = "lm", 
+                       trControl = ctrl, metric = "MAE")
+
+cat("\nMAE :", min(valid_m7$results$MAE), "\n")
+```
+
+**Verdict:** We officially crown the **7-variable model** as the champion of the Exhaustive Search phase.
+It represents the "sweet spot" where predictive power is maximized before complexity becomes redundant.
+
+### **Interpretation of Model Variables and Interactions**
+
+The selected model ($k=7$) demonstrates that sales performance is not driven by isolated marketing channels, but rather by the **synergistic interplay** between them.
+The significance of second-order interactions highlights a complex attribution ecosystem.
+The specific role of each term is detailed below:
+
+**1. `GBP`**
+
+This is the only variable that maintains a significant main effect independent of interactions.
+It acts as a macroeconomic proxy, capturing the impact of currency fluctuations on sales.
+It provides the baseline economic context upon which the marketing activities operate, adjusting predictions based on the strength of the Pound Sterling.
+
+**2. `Meta_investment:TV_investment`**
+
+This interaction captures the multiplier effect between traditional and social media.
+It suggests that Meta (Facebook/Instagram) campaigns do not operate in a vacuum; their return on investment (ROI) is significantly amplified when supported by simultaneous Television activity.
+TV likely generates top-of-funnel awareness, which Meta then converts into sales through retargeting.
+
+**3. `Meta_investment:web_visits`**
+
+This term links advertising spend with organic behavior.
+It indicates that Meta investment is most effective when web traffic is high.
+Essentially, paid social media acts as a conversion driver for users already visiting the website, or conversely, high web traffic signals a receptive audience that responds better to Meta advertising.
+
+**4. `sea_other_investment:GBP`**
+
+This interaction implies that the effectiveness of niche Search investments ("Sea Other") is sensitive to currency fluctuations.
+It suggests that the ROI of this specific digital channel varies depending on the economic environment (the GBP rate), possibly due to changes in cost-per-click (CPC) rates or consumer price sensitivity during currency shifts.
+
+**5. `sea_other_investment:TV_investment`**
+
+A classic example of the "halo effect." This term suggests that investments in secondary search categories perform significantly better when TV campaigns are active.
+Television likely drives users to search for specific terms, making the "Sea Other" investment more relevant and productive during TV flights.
+
+**6. `HBTV_Active:web_visits`**
+
+This is one of the most critical insights of the model.
+It reveals that the quality of web visits changes based on TV activity.
+A visit to the website is more likely to convert into a sale when the "Halo Brand TV" campaign is active.
+TV acts as a trust signal or catalyst, increasing the conversion rate of existing web traffic.
+
+**7. `TV_investment:web_visits`**
+
+Similar to the HBTV interaction but related to spend intensity.
+This confirms that as TV investment scales, the sales potential of every web visit increases.
+It mathematically validates the strategy of coordinating heavy TV ad buys with digital readiness, as the two channels exhibit strong positive covariance.
+
+## Ridge Regression
+
+Although the Exhaustive Search yielded a highly competitive 7-variable model, unconstrained Ordinary Least Squares (OLS) has inherent limitations, particularly when dealing with correlated interaction terms.
+To push the performance boundaries further and mitigate the risk of overfitting, we now transition to **Ridge Regression**.
+
+Ridge differs from OLS by introducing a **penalization term (L2)** to the loss function.
+Instead of simply minimizing the error, the algorithm minimizes the error *plus* the squared magnitude of the coefficients.
+This forces the model to "shrink" the coefficients of less important or highly correlated variables towards zero (without removing them entirely), resulting in a more stable model that generalizes better to new data.
+
+The effectiveness of Ridge Regression hinges entirely on the strength of this penalty, controlled by the hyperparameter **Lambda (**$\lambda$).
+
+-   If $\lambda$ is too low, the model behaves like standard OLS (overfitting).
+
+-   If $\lambda$ is too high, the model becomes too rigid and misses important signals (underfitting).
+
+To identify the precise "sweet spot," we will perform **Hyperparameter Optimization (HPO)**.
+By scanning a wide range of potential $\lambda$ values using Cross-Validation, we aim to mathematically pinpoint the exact penalty level that minimizes the Mean Absolute Error (MAE), potentially surpassing the benchmark set by our previous champion.
+
+```{r}
+library(elasticnet)
+
+formula_champion <- Sales ~ GBP + 
+                            Meta_investment:TV_investment + 
+                            Meta_investment:web_visits + 
+                            sea_other_investment:GBP + 
+                            sea_other_investment:TV_investment + 
+                            HBTV_Active:web_visits + 
+                            TV_investment:web_visits
+
+ridge_grid <- expand.grid(lambda = seq(0, 0.01, length = 100))
+
+set.seed(123)
+ridge_tune <- train(formula_champion, 
+                    data = final_train,
+                    method = 'ridge',
+                    preProc = c('scale','center'),
+                    tuneGrid = ridge_grid,
+                    trControl = ctrl,
+                    metric = "MAE") 
+
+print(ridge_tune)
+plot(ridge_tune)
+cat("Best Lambda:", ridge_tune$bestTune$lambda, "\n")
+cat("Minimal MAE (Cross-Validated):", min(ridge_tune$results$MAE), "\n")
+```
+
+The results from the Ridge Regression on the 7-variable subset provide a definitive statistical validation of our previous Exhaustive Search.
+The Hyperparameter Optimization (HPO) identified an optimal **Lambda (**$\lambda$) of 0.
+
+In the context of Regularized Regression, a Lambda of 0 effectively turns off the penalty mechanism, reducing the model back to a standard OLS regression.
+This result is highly significant for two reasons:
+
+1.  **Signal vs. Noise:** Regularization is designed to suppress "noisy" or weak coefficients to prevent overfitting.
+    The fact that the algorithm chose *not* to penalize any coefficient indicates that the 7 variables selected are **pure signal**.
+
+2.  **Statistical Robustness:** Looking at the p-values of the underlying model confirms this.
+    Every single predictor shows extreme statistical significance ($p < 0.001$, with `GBP` at $p < 2e-16$).
+    The t-values are high, and the standard errors are low.
+    There is no "fluff" in this model for Ridge to trim; the Exhaustive Search did its job perfectly.
+
+Essentially, the model is so structurally sound that adding "training wheels" (regularization) only hinders its performance.
+
+However, we must consider that we only applied Ridge to the pre-selected winner.
+The true power of Ridge Regression lies not in polishing a small model, but in managing **high-dimensional complexity**—situations where OLS fails.
+
+To ensure we aren't missing a "diamond in the rough," we will now re-run the Ridge Regression, but this time we will feed it the **original full formula with all quadratic interactions** (`(All Variables)^2`).
+
+```{r}
+formula_full_interactions <- Sales ~ (GBP + Meta_investment + TV_investment + 
+                                      web_visits + sea_other_investment + 
+                                      HBTV_Active)^2
+
+ridge_grid_fino <- expand.grid(lambda = seq(0, 0.02, length = 200))
+
+set.seed(123)
+ridge_super_tune <- train(formula_full_interactions, 
+                          data = final_train,
+                          method = 'ridge',
+                          preProc = c('scale','center'),
+                          tuneGrid = ridge_grid_fino,
+                          trControl = ctrl,
+                          metric = "MAE")
+
+print(ridge_super_tune)
+plot(ridge_super_tune, main = "Grid Search of the Best Lambda")
+
+cat("\n Best Lambda:", ridge_super_tune$bestTune$lambda)
+cat("\n Minimal MAE:", min(ridge_super_tune$results$MAE))
+
+coef_ridge <- predict(ridge_super_tune$finalModel, 
+                              s = ridge_super_tune$bestTune$lambda, 
+                              type = "coefficients",
+                              mode = "fraction") 
+print(coef_ridge)
+```
+
+**Results**
+
+-   **Best Lambda:** 0.0016
+
+-   **Resulting MAE:** **333.16** (Significantly worse than the 306 achieved by our 7-variable model).
+
+-   **Selected Variables:** The model effectively collapsed, shrinking almost all coefficients to zero except for **GBP**.
+
+**Interpretation: Why did it fail?** This result illustrates the "Signal-to-Noise" problem.
+By flooding the model with hundreds of uncurated interaction terms, we diluted the predictive power.
+The Ridge algorithm determined that the "cost" (penalty) of keeping these complex variables was too high compared to the marginal accuracy they provided.
+Consequently, it reverted to the single strongest predictor: the economy (`GBP`).
+
+**Conclusion** This experiment confirms that **more is not always better**.
+The 7-variable model identified in the previous step (MAE \~306) is not just a local lucky guess; it is the **global optimum**.
+It successfully isolates the specific synergies that drive sales without getting lost in the noise.
+
+**Verdict:** We discard the Full Ridge results and officially select the **7-variable OLS model** as the final champion.
+
+## Lasso Regression
+
+After testing Ridge, we now turn to **Lasso Regression**.
+While similar in concept, Lasso introduces a fundamental mathematical difference: it uses an **L1 penalty** (absolute value) rather than the L2 penalty used in Ridge.
+
+**The Key Difference:** While Ridge tends to shrink coefficients towards zero without ever fully eliminating them, Lasso is much stricter.
+It has the unique ability to force coefficients **exactly to zero**.
+This means Lasso functions as an automated **feature selector**, ruthlessly discarding variables that do not contribute significantly to the prediction.
+
+**The Experiment** We will proceed with the exact same strategy used in the previous step.
+We will feed the Lasso algorithm the **full formula containing all possible variable interactions**.
+The objective is to see if Lasso’s ability to "prune" the model can automatically identify a superior subset of variables, potentially beating our manually selected 7-variable champion.
+
+```{r}
+library(glmnet)
+
+formula_full <- Sales ~ (GBP + Meta_investment + TV_investment + 
+                         web_visits + sea_other_investment + 
+                         HBTV_Active)^2
+
+lasso_grid <- expand.grid(alpha = 1,  
+                          lambda = seq(0, 2, length = 100))
+set.seed(123)
+lasso_tune <- train(formula_full, 
+                    data = final_train,
+                    method = "glmnet", 
+                    trControl = ctrl,
+                    tuneGrid = lasso_grid,
+                    preProc = c('scale','center'), 
+                    metric = "MAE")
+
+print(lasso_tune)
+plot(lasso_tune, main = "Evolution of MAE with Lasso")
+
+cat("\n Best Lambda:", lasso_tune$bestTune$lambda)
+cat("\n Minimal MAE Lasso:", min(lasso_tune$results$MAE))
+
+coefs_final <- predict(lasso_tune$finalModel, 
+                         s = lasso_tune$bestTune$lambda, 
+                         type = "coefficients")
+
+coefs_matrix <- as.matrix(coefs_final)
+survivors <- coefs_matrix[coefs_matrix[,1] != 0, ]
+
+cat("\n--- VARIABLES SELECTED FOR LASSO (Coef != 0) ---\n")
+print(survivors)
+```
+
+-   **Best Lambda:** 0.48 (Low penalty).
+
+-   **Resulting MAE:** **336.46**.
+
+-   **Status:** Failed.
+    It performed worse than our 7-variable champion (MAE 306) and even slightly worse than the collapsed Ridge model (MAE 333).
+
+**The "Soup" of Variables** Unlike the Ridge model, which aggressively cut everything down to just `GBP`, Lasso did the opposite.
+It kept almost **every single interaction** in the model.
+The list of non-zero coefficients includes `GBP:Meta`, `GBP:TV`, `TV:Web`, and many others.
+
+Here comes a great question: *Why didn't Lasso penalize, given that Ridge penalized so heavily?*
+
+It comes down to how the mathematics of "Penalty" works in each algorithm when faced with a "messy" dataset (lots of noise and correlation).
+
+1.  **Ridge:** Ridge hates *large* numbers.
+    When you gave it hundreds of interacting variables, it saw a risk of coefficients exploding.
+    To play it safe, it shrunk everything to near-zero and kept only the safest, strongest bet: the economy (`GBP`).
+    It chose **underfitting** to avoid instability.
+
+2.  **Lasso:** Lasso tries to pick the best variable and delete the rest.
+    However, because the interactions are all slightly correlated and provide tiny bits of information, the algorithm got "confused." It couldn't find one clear winner to keep, so it kept a little bit of everything.
+    The low Lambda (0.48) tells us the algorithm felt that deleting variables increased the error, so it kept a "soup" of weak predictors.
+    It chose **overfitting**.
+
+**Conclusion** Both "Brute Force" methods failed, but in opposite directions.
+
+-   **Ridge** was too strict (MAE 333).
+
+-   **Lasso** was too lenient (MAE 336).
+
+-   **The Winner:** The **7-variable model** (MAE 302) remains the undisputed champion because it relies on human-guided logic and exhaustive search, not just mathematical penalties.
+
+It has been demonstrated that feeding the model with all available interaction terms yields suboptimal results.
+However, Lasso remains a valuable method for fine-tuning.
+Consequently, to validate the robustness of the selected candidate, Lasso Regression is applied specifically to the 7-variable champion model.
+The objective is to assess whether further pruning is beneficial—essentially, checking if the model achieves greater efficiency by zeroing out any remaining weak coefficients.
+This serves as the definitive polishing phase.
+
+```{r}
+formula_champion <- Sales ~ GBP + 
+                            Meta_investment:TV_investment + 
+                            Meta_investment:web_visits + 
+                            sea_other_investment:GBP + 
+                            sea_other_investment:TV_investment + 
+                            HBTV_Active:web_visits + 
+                            TV_investment:web_visits
+
+lasso_grid <- expand.grid(alpha = 1,  
+                          lambda = seq(0, 0.2, length = 100))
+
+set.seed(123)
+lasso_champion_tune <- train(formula_champion, 
+                             data = final_train,
+                             method = "glmnet", 
+                             trControl = ctrl,
+                             tuneGrid = lasso_grid,
+                             preProc = c('scale','center'),
+                             metric = "MAE")
+
+cat("--- LASSO RESULTS ---\n")
+print(lasso_champion_tune)
+plot(lasso_champion_tune, main = "Lasso Results")
+
+cat("\n Best Lambda:", lasso_champion_tune$bestTune$lambda)
+cat("\n Minimal MAE :", min(lasso_champion_tune$results$MAE))
+
+coefs_final <- predict(lasso_champion_tune$finalModel, 
+                         s = lasso_champion_tune$bestTune$lambda, 
+                         type = "coefficients")
+
+print(coefs_final)
+```
+
+**The "Plateau" Phenomenon** The results from the Lasso regression on the 7-variable model exhibit a distinct pattern: the Mean Absolute Error (MAE) remains completely constant at **307.48** across a substantial range of penalty values (Lambda 0.00 to \~0.15).
+
+**Why does the penalty have no effect?** Typically, as the Lambda penalty increases, coefficients shrink and error rates fluctuate.
+However, in this instance, the "flatline" indicates extreme statistical robustness.
+The variables selected are so significant—and their relationship to Sales is so strong—that the algorithm resists shrinking them.
+Even when a penalty is applied, the mathematical benefit of keeping the coefficients at their full value outweighs the cost of the penalty.
+The signal is simply too strong to be suppressed by a standard regularization term.
+
+**The Consequence: No Variables Removed** The algorithm ultimately selected a Lambda of 0.15.
+At this level, **zero variables were eliminated**.
+The final Lasso model is mathematically almost identical to the unpenalized OLS model.
+It confirms that every single variable in the 7-variable set is essential.
+
+## ElasticNet
+
+Following the individual tests of Ridge and Lasso, the final regularization technique to be evaluated is **ElasticNet**.
+
+**Concept** ElasticNet represents a hybrid approach that combines the penalties of both Ridge (L2) and Lasso (L1) simultaneously.
+
+-   **Ridge** is excellent at handling correlated variables but cannot eliminate them (it only shrinks them).
+
+-   **Lasso** is excellent at selecting variables but can be unstable when predictors are highly correlated (arbitrarily picking one and dropping the others).
+
+ElasticNet aims to capture the "best of both worlds": it encourages group selection of correlated variables while still maintaining the ability to set coefficients to zero.
+
+**The Experiment** To ensure a comprehensive analysis, the "Brute Force" strategy is applied one final time.
+The ElasticNet algorithm will be fed the full formula containing **every possible variable interaction**.
+The goal is to determine if this balanced penalization strategy can succeed where the individual methods failed.
+Specifically, we investigate whether ElasticNet can navigate the noise of the complex dataset to identify a superior model structure that neither the "cautious" Ridge nor the "greedy" Lasso could find.
+
+```{r}
+formula_full <- Sales ~ (GBP + Meta_investment + TV_investment + 
+                         web_visits + sea_other_investment + 
+                         HBTV_Active)^2
+
+elastic_grid <- expand.grid(alpha = seq(0, 1, by = 0.1), 
+                            lambda = seq(0, 2, length = 50))
+
+set.seed(123)
+elastic_tune <- train(formula_full, 
+                      data = final_train,
+                      method = "glmnet", 
+                      trControl = ctrl,
+                      tuneGrid = elastic_grid,
+                      preProc = c('scale','center'), 
+                      metric = "MAE")
++
+print(elastic_tune$bestTune) 
+cat("\n Minimal MAE :", min(elastic_tune$results$MAE))
+
+plot(elastic_tune, main = "ElasticNet Results")
+coefs_elastic <- predict(elastic_tune$finalModel, 
+                         s = elastic_tune$bestTune$lambda, 
+                         type = "coefficients")
+
+coefs_matrix <- as.matrix(coefs_elastic)
+survivors <- coefs_matrix[coefs_matrix[,1] != 0, ]
+
+print(survivors)
+```
+
+-   **MAE:** **333.77**
+
+-   **Structure:** The model retained a "crowded" list of over 20 variables and interactions, including `GBP`, `Meta`, `TV`, and numerous cross-combinations like `GBP:Meta_investment` and `TV_investment:sea_other_investment`.
+
+The ElasticNet algorithm failed to outperform the baseline.
+With an MAE of **333.77**, it performs significantly worse than the 7-variable OLS model (MAE \~308) and yields results almost identical to the failed Ridge regression (MAE \~333).
+Rather than finding a "magic combination," the hybrid penalty struggled with the noise in the dataset, keeping too many weak variables and failing to create a concise, predictive model.
+The "Brute Force" strategy with ElasticNet does not provide a better solution.
+
+Although the complex approach has been ruled out, one final check is required for completeness.
+The **7-variable champion formula** will be run through the ElasticNet algorithm.
+This is done solely to observe if the hybrid penalty applies any interesting adjustments to the coefficients of the optimal model, effectively serving as a final "sanity check."
+
+```{r}
+formula_champion <- Sales ~ GBP + 
+                            Meta_investment:TV_investment + 
+                            Meta_investment:web_visits + 
+                            sea_other_investment:GBP + 
+                            sea_other_investment:TV_investment + 
+                            HBTV_Active:web_visits + 
+                            TV_investment:web_visits
+
+elastic_grid_final <- expand.grid(alpha = seq(0, 1, by = 0.1), 
+                                  lambda = seq(0, 1, length = 50)) 
+set.seed(123)
+elastic_champion <- train(formula_champion, 
+                          data = final_train,
+                          method = "glmnet", 
+                          trControl = ctrl,
+                          tuneGrid = elastic_grid_final,
+                          preProc = c('scale','center'), 
+                          metric = "MAE")
+
+print(elastic_champion$bestTune)
+cat("\n Minimal MAE:", min(elastic_champion$results$MAE))
+
+plot(elastic_champion, main = "ElasticNet Results")
+coefs_final <- predict(elastic_champion$finalModel, 
+                         s = elastic_champion$bestTune$lambda, 
+                         type = "coefficients")
+print(coefs_final)
+```
+
+-   **Variable Selection:** The algorithm retained **all 7 variables** with non-zero coefficients.
+
+The results from ElasticNet are virtually indistinguishable from those of the standard OLS and Lasso models.
+The coefficients (e.g., `GBP` at 548.77) are nearly identical to the unpenalized values.
+This lack of significant change confirms that the chosen predictors are robust; they are strong enough that even a hybrid regularization technique sees no benefit in suppressing them.
+
+After an exhaustive evaluation process including Stepwise selection, "Brute Force" interactions, and three types of regularization (Ridge, Lasso, ElasticNet), the conclusion is definitive.
+
+Complex regularization techniques do not offer a meaningful performance advantage over the simpler approach for this specific dataset.
+Therefore, adhering to the principle of parsimony (simplicity), **the Ordinary Least Squares (OLS) model with the 7 interaction terms is officially selected as the Final Model.**
+
+# Machine Learning and Non-Linear Architectures
+
+While the previous phase of **Statistical Learning** established a solid linear foundation, the inherent complexity of marketing dynamics often requires **non-linear architectures**.
+Standard regression models assume a constant relationship between variables; however, marketing channels frequently exhibit **saturation effects** or **threshold behaviors** where the return on investment is not a linear function of the spend.
+
+To capture these complex patterns, the analysis now transitions towards **Machine Learning (ML)** algorithms.
+This shift allows for the exploration of models such as **k-Nearest Neighbors (kNN)**, **Random Forests**, and **Gradient Boosting Machines (GBM)**.
+These techniques are specifically designed to handle high-dimensional interactions and non-linearities without the need for manual formula specification.
+The primary objective of this section is to minimize the **Mean Absolute Error (MAE)** by allowing the algorithms to "learn" the optimal structure of the data while carefully monitoring the risk of **overfitting**.
+
+```{r, message=FALSE, warning=FALSE}
+# needed libraries for this ML section
+library(readxl)
+library(dplyr)
+library(lubridate)
+
+library(caret)
+library(kknn)
+library(ranger)
+library(gbm)
+
+library(knitr)
+library(kableExtra)
+library(ggplot2)
+library(rpart.plot)
+
+library(vip)   
+library(iml)  
+
+
+select <- dplyr::select
+filter <- dplyr::filter
+train  <- caret::train
+month<-lubridate::month
+```
+
+## Feature Engineering for Complex Models
+
+To empower these ML algorithms, the dataset undergoes a specialized transformation process.
+Unlike the linear models that focused on raw expenditure, the ML pipeline incorporates **categorical seasonality** and **operational status flags** to guide the learning process and reduce noise.
+
+1.  **Seasonality Mapping:** We introduce a new `Season` variable to group months into `Low_Season`, `Mid_Season`, and `Peak_Season`.
+    This structural feature helps the models understand that a dollar invested during the Christmas campaign (`Peak_Season`) yields a significantly different return than a dollar in the middle of summer, regardless of the baseline spend.
+
+2.  **Activation Flags:** Reflecting the "switch-like" behavior observed in the **EDA**, in the same way as in the case of linear models, we convert continuous investment variables into binary indicators: `HBTV_Active`, `TikTok_Active`, and `Radio_Active`.
+    This simplifies the search space for the algorithms, allowing them to first determine the impact of **being active** in a specific channel before assessing the marginal utility of the investment magnitude.
+
+```{r}
+data_processed <- data_full %>%
+  arrange(Monday_date) %>%
+  mutate(
+    # Extracting month as an auxiliary label for seasonality grouping
+    Month_aux = month(Monday_date, label = TRUE, abbr = TRUE),
+    
+    # Defining structural seasons based on historical sales performance
+    Season = factor(case_when(
+      Month_aux %in% c("oct", "nov", "dic") ~ "Peak_Season",
+      Month_aux %in% c("abr", "may", "jun") ~ "Mid_Season",
+      TRUE ~ "Low_Season"
+    ), levels = c("Low_Season", "Mid_Season", "Peak_Season")),
+    
+    # Converting specific channels into binary operational flags
+    HBTV_Active   = as.numeric(TV_hbtv_investment > 0),
+    TikTok_Active = as.numeric(tiktok_investment > 0),
+    Radio_Active  = as.numeric(Radio_investment > 0)
+  ) %>%
+  select(-Month_aux) # Removing the label to keep the feature set clean
+```
+
+```{r}
+#Same splitting that in the previous section
+final_train <- data_processed %>% 
+  filter(!is.na(Sales)) %>% 
+  select(-Monday_date)
+
+final_test <- data_processed %>% 
+  filter(is.na(Sales)) 
+```
+
+To ensure the stability and reliability of our performance estimates, we establish a rigorous validation framework.
+Given the relatively small sample size (**n=117**), a single cross-validation run could yield high variance in the results depending on the random data split.
+By implementing a **Repeated Cross-Validation** strategy via the `trainControl` function, the 10-fold process is executed **3 times**.
+This approach provides a more robust estimate of the **Mean Absolute Error (MAE)** and ensures that the subsequent hyperparameter tuning for our complex models is not biased by a single partition of the data.
+
+```{r}
+cv <- trainControl(method = "repeatedcv", number = 10, repeats = 3) 
+```
+
+### k-Nearest Neighbors (kNN) Optimization
+
+The first non-parametric model implemented is **k-Nearest Neighbors (kNN)**, specifically using the `kknn` engine.
+Unlike linear models, kNN makes predictions based on the proximity of observations in a multi-dimensional feature space.
+To find the most accurate configuration, we perform a grid search over three fundamental **hyperparameters**:
+
+1.  **`kmax` (Number of Neighbors):** We test a range from 3 to 15 to determine the optimal balance between local sensitivity and global smoothing.
+2.  **`distance` (Minkowski Parameter):** We compare the **Manhattan** distance ($d=1$) against the **Euclidean** distance ($d=2$).
+3.  **`kernel` (Weighting Function):** We evaluate the **rectangular** kernel (standard unweighted averaging) versus an **optimal** kernel (Tri-cubic weighting), which gives more importance to the closest neighbors.
+
+Given that kNN is a distance-based algorithm, it is highly sensitive to the scale of the predictors.
+Therefore, we incorporate `center` and `scale` within the `preProc` argument to ensure that variables with larger numerical ranges do not disproportionately dominate the distance calculations.
+
+```{r}
+#ensure reproducibility of results
+set.seed(123)
+
+# Defining the hyperparameter grid for kNN
+knn_grid <- expand.grid(
+  kmax = c(3, 5, 7, 9, 11, 15), 
+  distance = c(1, 2),                
+  kernel = c("rectangular", "optimal") 
+)
+
+# Training the model with centering, scaling, and repeated CV
+knn_fit <- train(
+  Sales ~ ., 
+  data = final_train,
+  method = "kknn",
+  preProc = c("center", "scale"), 
+  trControl = cv,
+  metric = "MAE",
+  tuneGrid = knn_grid
+)
+```
+
+### kNN Performance Analysis and Visualization
+
+Once the grid search is completed, we extract the top-performing architectures to assess the stability of the model.
+The following table summarizes the **Top 5 Optimized Configurations** based on the lowest **Mean Absolute Error (MAE)**.
+
+To gain deeper insights into the tuning process, a diagnostic plot is generated to visualize the relationship between the number of neighbors (`kmax`), the **Distance Metric**, and the **Kernel type**.
+This visualization is crucial for identifying the "sweet spot" of model complexity: a $k$ that is too small might overfit to local noise, while a $k$ that is too large could over-smooth and miss relevant non-linear patterns in the sales data.
+The goal is to select a configuration that minimizes the **MAE** while maintaining a stable error rate across different distance metrics.
+
+```{r}
+# Extracting the best performing configurations
+knn_top_5 <- knn_fit$results %>%
+  select(kmax, distance, kernel, MAE, RMSE, Rsquared) %>%
+  arrange(MAE) %>%
+  head(5)
+
+# Rendering the results table
+knn_top_5 %>%
+  kable(digits = 4, 
+        row.names = FALSE, 
+        align = "cccccc",
+        caption = "Table: Top 5 Optimized kNN Configurations",
+        col.names = c("k (Neighbors)", "Distance", "Kernel", "MAE", "RMSE", "R-Squared")) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = F) %>%
+  row_spec(1, bold = TRUE, color = "white", background = "#5D6D7E")
+
+# Visualizing the hyperparameter landscape
+ggplot(knn_fit$results, aes(x = kmax, y = MAE, color = as.factor(distance), shape = kernel)) +
+  geom_line() + 
+  geom_point(size = 3) +
+  scale_x_continuous(breaks = c(1, 3, 5, 7, 9, 11, 15)) +
+  scale_color_discrete(name = "Distance Metric", labels = c("1" = "Manhattan", "2" = "Euclidean")) +
+  labs(
+    title = "kNN Hyperparameter Optimization",
+    subtitle = "Comparison of distance metrics and kernels",
+    x = "Number of Neighbors (k)",
+    y = "MAE",
+    shape = "Kernel"
+  ) +
+  theme_minimal()
+```
+
+The evaluation of the **k-Nearest Neighbors (kNN)** model identifies an optimal configuration at **k=7** using a **Euclidean distance** ($d=2$) and an **optimal kernel**.
+This setup achieves the lowest **Mean Absolute Error (MAE)** of **359.0450**, indicating that the model performs best when it considers a moderate number of local neighbors while weighting their influence based on proximity.
+
+We observe that the **optimal kernel** consistently outperforms the standard rectangular one in all top configurations, proving that assigning higher importance to closer observations effectively captures the local variance of `Sales`.
+Furthermore, the **R-Squared** values remain stable around **0.40**, suggesting that while the model captures roughly 40% of the variability, the error metrics are relatively consistent across different values of $k$ (from 3 to 11).
+The transition from $k=7$ to $k=5$ shows only a marginal increase in error, which confirms a smooth and stable optimization landscape rather than one prone to extreme sensitivity or overfitting.
+
+## Classification and Regression Trees (CART)
+
+Continuing with non-linear architectures, we implement **Classification and Regression Trees (CART)** using the `rpart` engine.
+Unlike kNN, which relies on local proximity, CART partitions the feature space into recursive binary splits to minimize the variance within each resulting leaf.
+To prevent the tree from becoming overly complex and capturing noise (overfitting), we perform an extensive grid search over three key **hyperparameters**:
+
+1.  **`cp` (Complexity Parameter):** Controls the pruning process; a split is only attempted if it improves the overall fit by a factor of `cp`.
+2.  **`minsplit`:** Defines the minimum number of observations that must exist in a node for a split to be attempted.
+3.  **`maxdepth`:** Limits the number of consecutive splits from the root to the furthest leaf, ensuring the tree remains interpretable and robust.
+
+```{r}
+# Defining the exhaustive search grid for CART
+search_grid <- expand.grid(
+  cp = seq(0, 0.05, by = 0.01),
+  minsplit = c(5, 10, 15),
+  maxdepth = c(3, 4, 5)
+)
+
+# Iterative evaluation of configurations using repeated CV
+results <- apply(search_grid, 1, function(params) {
+  set.seed(123)
+  model <- train(
+    Sales ~ ., 
+    data = final_train,
+    method = "rpart",
+    trControl = cv,
+    tuneGrid = data.frame(cp = params["cp"]),
+    control = rpart.control(minsplit = params["minsplit"], maxdepth = params["maxdepth"])
+  )
+  return(min(model$results$MAE))
+})
+
+search_grid$MAE <- results
+```
+
+### CART Performance and Optimal Architecture
+
+Once the iterative search is complete, we extract the top-performing architectures to assess the stability of the tree.
+The following table highlights the **Top 5 Optimized CART Configurations**.
+By selecting the combination of `cp`, `minsplit`, and `maxdepth` that minimizes the **Mean Absolute Error (MAE)**, we identify the most efficient hierarchical structure for predicting `Sales`.
+
+Following the identification of the best hyperparameters, we re-train the model on the full training set using the `method = "none"` strategy.
+This allows us to freeze the optimal parameters and generate a final, stable tree that can be visualized and interpreted for business decision-making.
+
+```{r}
+# Sorting and displaying the best configurations
+cart_top_5 <- search_grid %>%
+  arrange(MAE) %>%
+  head(5)
+
+cart_top_5 %>%
+  kable(digits = 4, 
+        row.names = FALSE, 
+        align = "cccc",
+        caption = "Table: Top 5 Optimized CART Configurations",
+        col.names = c("CP (Complexity)", "Min Split", "Max Depth", "MAE")) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = F) %>%
+  row_spec(1, bold = TRUE, color = "white", background = "#16a085")
+
+# Re-training the final model with the absolute best configuration
+best_config <- search_grid[which.min(search_grid$MAE), ]
+
+final_cart_model <- train(
+  Sales ~ ., 
+  data = final_train,
+  method = "rpart",
+  trControl = trainControl(method = "none"),
+  tuneGrid = data.frame(cp = best_config$cp),
+  control = rpart.control(
+    minsplit = best_config$minsplit, 
+    maxdepth = best_config$maxdepth
+  )
+)
+
+# Re-training the final model with the absolute best configuration
+search_grid$MAE <- results
+best_config <- search_grid[which.min(search_grid$MAE), ]
+
+final_cart_model <- train(
+  Sales ~ ., 
+  data = final_train,
+  method = "rpart",
+  trControl = trainControl(method = "none"),
+  tuneGrid = data.frame(cp = best_config$cp),
+  control = rpart.control(
+    minsplit = best_config$minsplit, 
+    maxdepth = best_config$maxdepth
+  )
+)
+```
+
+The results from the grid search reveal a high degree of **stability** across the top-performing configurations.
+Specifically, we observe that for a `maxdepth` of 3 and a `minsplit` of 15, the model achieves a consistent **Mean Absolute Error (MAE)** of **327.8197**, regardless of whether the **Complexity Parameter (CP)** is set to 0.04 or 0.05.
+This plateau in performance suggests that the tree structure has reached an optimal point of simplicity where further pruning does not significantly alter the predictive accuracy.
+The fact that several configurations yield identical error metrics indicates a robust "sweet spot" in the bias-variance tradeoff, ensuring that the model captures the primary drivers of `Sales` without becoming overly sensitive to minor fluctuations in the training data.
+
+### Visualizing Decision Logic and Feature Importance
+
+The visualization of the **Optimized CART** reveals the hierarchical importance of the predictors.
+Each split represents a decision boundary that maximizes the homogeneity of the resulting subsets.
+Complementing this, we utilize **Variable Importance Plots (VIP)** to quantify the relative contribution of each feature.
+This dual approach allows us to see not only *which* variables are critical (e.g., `GBP` or `Meta_investment`) but exactly *how* the model uses them to segment the data and generate predictions.
+
+```{r}
+# Displaying the tree and VIP side-by-side to visualize this hierarchy
+rpart.plot(final_cart_model$finalModel, 
+           main = "Optimized CART: Structural Splits",
+           type = 4, extra = 101, box.palette = "RdYlGn")
+
+vip(final_cart_model, num_features = 10) + 
+  theme_minimal() + 
+  labs(title = "Global Variable Importance")
+```
+
+A fascinating divergence appears when comparing the **Decision Tree** visualization with the **Variable Importance Plot (VIP)**.
+While the tree identifies `GBP` as the primary root split, the VIP ranks `TV_investment` as the most critical feature, followed by `GBM` and `sea_brand`.
+This is not a contradiction, but rather a reflection of how different metrics capture influence:
+
+-   **The First Split (Local Logic):** The tree selects `GBP` for the first node because it provides the single largest reduction in variance for the *entire* dataset at that specific point. It is the most efficient way to partition the data into two large, distinct groups of `Sales`.
+-   **Global Importance (VIP):** The VIP calculation for CART (often based on "improvement") accounts for the total reduction in error that a variable provides across **all possible splits**, even those that don't end up as the "winner" for a specific node in the final tree.
+-   **Surrogate Variables and Interaction:** `TV_investment` might not be the root split, but it likely appears in multiple branches or acts as a strong "surrogate" for other variables. Its top ranking in the VIP suggests that its cumulative impact on the model's accuracy is higher across the whole feature space, whereas `GBP` is highly effective at the start but loses its comparative partitioning power in the deeper, more specific branches of the tree.
+
+This tells us that while `GBP` is the best **starting indicator** for sales volume, `TV_investment` remains the most influential **continuous driver** across the different scenarios identified by the model.
+
+## Random Forest
+
+To further improve our predictive power, we implement **Random Forest** using the `ranger` engine.
+While a single decision tree (CART) is prone to high variance, a Random Forest mitigates this by building an "ensemble" of multiple trees.
+Each tree is trained on a random bootstrap sample of the data, and each split considers only a random subset of predictors.
+We perform a grid search over three essential **hyperparameters**:
+
+1.  **`mtry`:** The number of predictors randomly sampled as candidates at each split. We test values from 2 to 5 to find the optimal balance of feature diversity.
+2.  **`splitrule`:** We compare the standard **variance** reduction against **extratrees** (Extremely Randomized Trees), which adds an extra layer of randomness to the split selection.
+3.  **`min.node.size`:** Controls the depth of the trees by setting the minimum number of observations required in a terminal node.
+
+```{r}
+# Defining the hyperparameter grid for Random Forest
+rf_grid <- expand.grid(
+  mtry = c(2, 3, 4, 5),
+  splitrule = c("variance", "extratrees"),
+  min.node.size = c(1, 5, 10, 15)          
+)
+
+# Training the optimized Random Forest model
+set.seed(123)
+model_rf_optimized <- train(
+  Sales ~ ., 
+  data = final_train,
+  method = "ranger",
+  trControl = trainControl(method = "cv", number = 5),
+  tuneGrid = rf_grid,
+  importance = 'permutation' 
+)
+```
+
+After the cross-validation process, we evaluate the stability of the ensemble.
+**Random Forest** is generally more robust than a single tree because the aggregation (**bagging**) process cancels out individual errors from specific trees, reducing the overall variance of the model.
+
+The following table identifies the **Top 5 Optimized Configurations** extracted from our grid search.
+The best model is selected based on the lowest **Mean Absolute Error (MAE)**, ensuring we prioritize the architecture that most accurately captures the central tendency of `Sales` while remaining resilient to outliers.
+
+```{r}
+# Sorting and displaying the top-performing Random Forest architectures
+rf_top_5 <- model_rf_optimized$results %>%
+  select(mtry, splitrule, min.node.size, MAE, RMSE) %>%
+  arrange(MAE) %>%
+  head(5)
+
+rf_top_5 %>%
+  kable(digits = 4, 
+        row.names = FALSE, 
+        align = "ccccc",
+        caption = "Table: Top 5 Optimized Random Forest Configurations",
+        col.names = c("mtry", "Split Rule", "Min Node Size", "MAE", "RMSE")) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = F) %>%
+  row_spec(1, bold = TRUE, color = "white", background = "#2c3e50")
+```
+
+The results of the grid search for the **Random Forest (Ranger)** model demonstrate that the best performance is achieved with an **mtry of 5**, a **variance split rule**, and a **minimum node size of 1**.
+This configuration yields a **Mean Absolute Error (MAE)** of **310.8147**, which represents a significant improvement over our previous **kNN (359.04)** and **CART (327.81)** models.
+
+Several key observations can be drawn from the top-performing architectures: \* **Predictor Density:** The model performs better when it has access to a larger number of variables at each split (`mtry = 5`), suggesting complex interactions between the marketing drivers that require more "choices" at each node.
+\* **Model Depth:** A `min.node.size` of 1 indicates that the ensemble benefits from deeper, fully grown trees, as the averaging effect of the forest effectively cancels out the overfitting that would normally occur in a single deep tree.
+\* **Superiority over CART:** The drop in MAE from 327 to 310 confirms the power of **ensemble learning**.
+By combining multiple trees, we have captured a more nuanced relationship between investments and `Sales`, reducing the error by approximately 5% compared to the single-tree approach.
+
+### Feature Importance: Permutation Method
+
+Unlike the standard CART model, where importance is based on node purity gain, here we employ **Permutation Importance**.
+This rigorous method evaluates a variable's predictive power by randomly shuffling its values and measuring the resulting increase in model error.
+If a predictor is truly influential, breaking its relationship with the target variable will significantly degrade the model's accuracy.
+
+This approach provides a more reliable ranking of drivers, allowing us to confirm if the dominance of variables like `TV_investment` or `GBP` holds true even when subjected to the randomized, multi-tree environment of a **Random Forest**.
+This step is vital for ensuring that our business insights are based on robust, generalized patterns rather than artifacts of a single tree's structure.
+
+```{r}
+vip(model_rf_optimized, num_features = 10) +
+  theme_minimal() +
+  labs(title = "Random Forest Variable Importance")
+```
+
+The **Variable Importance Plot (VIP)** for our Random Forest provides a more robust confirmation of the hierarchy we began to see in the CART analysis.
+Here, `GBP` dominates the ranking with a relative importance of **100**, followed by `TV_hbtv_investment` and `TV_investment`, both scoring significantly lower at approximately **37**.
+
+This distribution offers several critical insights when related back to our **CART** findings:
+
+-   **The Supremacy of GBP:** In the CART model, `GBP` was selected as the **root split** (the first decision), and Random Forest reinforces this by assigning it the maximum importance score. This confirms that `GBP` is not just a good starting point for a single tree, but the most consistently powerful predictor across the entire ensemble of trees.
+-   **TV Investment as a Key Driver:** While `TV_investment` and `TV_hbtv_investment` show lower scores compared to the "giant" that is `GBP`, their position in the top 3 (both around 37) aligns with why they appeared as critical secondary splits in the CART structure. In Random Forest, because we use **Permutation Importance**, this ranking tells us that shuffling these TV variables hurts the model's accuracy significantly, proving they are essential "engines" of the model.
+-   **Reduction of Noise:** Unlike CART, where variables can sometimes appear important just because they are near the top of a specific branch, Random Forest averages out these effects. The fact that the same variables remain at the top suggests that we have found the **true structural drivers** of `Sales`, moving beyond local fluctuations to global patterns.
+
+## Gradient Boosting Machine (GBM)
+
+As the final model in our non-parametric journey, we implement a **Gradient Boosting Machine (GBM)**.
+Unlike Random Forest, which builds trees in parallel, GBM belongs to the **sequential ensemble** family.
+It employs a "boosting" strategy where each new tree is trained specifically to predict the residuals (errors) of the previous ones.
+
+To fine-tune this learner, we defined a search space focusing on the core drivers of boosting performance: \* **Tree Complexity:** We tested `interaction.depth` from **1 to 7**, allowing the model to move from simple additive effects to complex high-order interactions.
+\* **Iterative Learning:** We explored `n.trees` between **100 and 250**, balancing computational cost with the need for enough iterations to minimize residuals.
+\* **Learning Pace:** We evaluated three levels of `shrinkage` (**0.01, 0.05, 0.1**).
+This is crucial as a smaller shrinkage often prevents overfitting but requires more trees.
+\* **Node Regularization:** Finally, we compared `n.minobsinnode` of **5 and 10** to ensure the leaves have enough statistical weight.
+
+```{r}
+# Defining the hyperparameter grid for GBM optimization
+set.seed(123)
+gbm_grid <- expand.grid(
+  interaction.depth = c(1, 3, 5, 7), 
+  n.trees = c(100, 150, 200, 250),
+  shrinkage = c(0.01, 0.05, 0.1),
+  n.minobsinnode = c(5, 10)
+)
+
+# Training the GBM model using repeated cross-validation
+model_gbm <- train(
+  Sales ~ ., 
+  data = final_train,
+  method = "gbm",
+  trControl = cv,
+  tuneGrid = gbm_grid,
+  metric = "MAE",
+  verbose = FALSE 
+)
+```
+
+### GBM Performance and Optimization Landscape
+
+Once the boosting process is complete, we analyze the performance across all tested configurations.
+The **Gradient Boosting** model is typically highly sensitive to its parameters, especially the balance between `shrinkage` and `n.trees`.
+By minimizing the **Mean Absolute Error (MAE)**, we identify the exact point where the model stops learning the signal and begins to risk overfitting.
+
+The following table highlights the **Top 5 Optimized GBM Configurations**, representing the most accurate architectures for predicting `Sales`.
+
+```{r}
+# Sorting and displaying the top-performing GBM architectures
+gbm_top_5 <- model_gbm$results %>%
+  select(interaction.depth, n.trees, shrinkage, n.minobsinnode, MAE, RMSE) %>%
+  arrange(MAE) %>%
+  head(5)
+
+gbm_top_5 %>%
+  kable(digits = 4, 
+        row.names = FALSE, 
+        align = "cccccc",
+        caption = "Table: Top 5 Optimized Gradient Boosting Configurations",
+        col.names = c("Tree Depth", "Total Trees", "Learning Rate", "Min. Node Size", "MAE", "RMSE")) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = F) %>%
+  row_spec(1, bold = TRUE, color = "white", background = "#856404")
+```
+
+The optimization results for the **Gradient Boosting Machine (GBM)** reveal a clear winner.
+The best configuration achieved a **Mean Absolute Error (MAE) of 282.4482**, using a `Tree Depth` of 1, `200 Total Trees`, and a `Learning Rate` of 0.05.
+This result is highly revealing for several reasons:
+
+-   **The "Stump" Paradox (Depth = 1):** Interestingly, the top three configurations all use a `Tree Depth` of 1. In boosting terms, these are called **"Decision Stumps"**. This suggests that the relationship between marketing investments and Sales in this dataset is primarily **additive**. Instead of complex non-linear interactions between variables, the model finds that summing the individual effects of each driver (like TV or GBP) provides the most stable and accurate predictions.
+-   **Learning Rate and Stability:** A `Learning Rate` of 0.05 proved to be the "sweet spot". It is slow enough to avoid overfitting but fast enough to converge in 200 trees. The consistency of the top 5 models (all with MAEs around 282-285) indicates that the model is very robust and the results are not due to a lucky combination of parameters.
+
+## Model comparison
+
+To conclude our analysis, we consolidate the results from all the methodologies explored in this project.
+To ensure a **fair and rigorous comparison**, every model—from the simplest kNN to the advanced Gradient Boosting—has been evaluated using the same **Repeated Cross-Validation** framework ($5$ folds, $3$ repetitions).
+
+This approach minimizes the risk of selection bias and ensures that the **Mean Absolute Error (MAE)** reported for each candidate is a stable and reliable estimate of its predictive power.
+By aligning the validation criteria, we can directly contrast the automated pattern recognition of non-parametric algorithms against our structured, theory-driven "Formula Marvelous."
+
+The following leaderboard ranks the models by their accuracy while also considering their **Explainability**, a crucial factor for strategic decision-making in marketing.
+
+```{r, include=FALSE}
+formula_marvelous <- Sales ~ GBP + 
+                             Meta_investment:TV_investment + 
+                             Meta_investment:web_visits + 
+                             sea_other_investment:GBP + 
+                             sea_other_investment:TV_investment + 
+                             HBTV_Active:web_visits + 
+                             TV_investment:web_visits
+
+model_7_final <- lm(formula_marvelous, data = final_train)
+
+summary(model_7_final)
+
+set.seed(123)
+valid_m7 <- train(formula_marvelous, data = final_train, method = "lm", 
+                       trControl = cv, metric = "MAE")
+
+cat("\nMAE :", min(valid_m7$results$MAE), "\n")
+```
+
+```{r}
+# 1. Consolidating the Best MAE from each approach
+resumen_mae <- data.frame(
+  Model = c("GBM", "Random Forest", "CART", "kNN", "Linear Model (Marvelous)"),
+  MAE = c(
+    min(model_gbm$results$MAE), 
+    min(model_rf_optimized$results$MAE), 
+    best_config$MAE, 
+    min(knn_fit$results$MAE),
+    min(valid_m7$results$MAE)
+  ),
+  Explainability = c("Medium", "Medium", "High", "Low", "Very High")
+)
+
+# 2. Sorting by accuracy (Lower MAE is better)
+resumen_mae <- resumen_mae[order(resumen_mae$MAE), ]
+
+# 3. Generating the final Leaderboard table
+resumen_mae %>%
+  kable(digits = 2, 
+        row.names = FALSE, 
+        align = "lcc", 
+        caption = "Table: Global Performance Summary (Lower MAE = Better Model)") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed")) %>%
+  # Highlight the best performing model
+  row_spec(1, bold = TRUE, color = "white", background = "#2c3e50")
+```
+
+The consolidated leaderboard reveals a clear hierarchy in predictive performance.
+The **Gradient Boosting Machine (GBM)** emerges as the absolute winner with an **MAE of 282.45**, achieving a significant error reduction compared to the baseline models.
+
+Several key conclusions can be drawn from these results:
+
+-   **The Power of Boosting:** GBM's ability to minimize residuals sequentially has allowed it to outperform the "Parallel" approach of Random Forest (**310.81**) and the simpler neighborhood logic of kNN (**359.04**).
+-   **The Efficiency of Structured Logic:** The **"Formula Marvelous" (Linear Model)** stands out as a formidable runner-up. With an **MAE of 306.78**, it is only slightly less accurate than GBM but offers **"Very High" Explainability**. In a corporate environment, this small trade-off in precision might be preferable to gain total transparency in marketing coefficients.
+-   **Consistency in Hierarchy:** The fact that both the automated GBM and the hand-crafted Linear Model (which includes specific interactions) perform so well confirms that our initial hypothesis about variable synergies was correct.
+
+**Winner:** **GBM** is selected as the final model so far.
+It offers the highest predictive accuracy, ensuring that the business can anticipate sales fluctuations with the lowest possible margin of error.
+
+### Validating Model Robustness: The Overfitting Check
+
+While **GBM** has proven to be the most accurate model during the training and cross-validation phase, we must perform a final diagnostic: the **Overfitting Test**.
+A model that "memorizes" the training data too closely might fail to generalize when predicting future sales.
+
+To verify this, we must compare its performance on the full training set against the results obtained via **Repeated Cross-Validation**.
+
+-   **Train MAE:** Represents how well the model "memorized" the training data.
+-   **CV MAE:** Represents how well the model generalizes to unseen data.
+
+If the gap between these two metrics is narrow, we can conclude that the model is robust and its predictive power is genuine.
+
+```{r}
+# 1. Prediction on the full training set
+pred_train_full <- predict(model_gbm, newdata = final_train)
+
+# 2. Calculating MAE for the full training set
+mae_train_full <- mean(abs(pred_train_full - final_train$Sales))
+
+# 3. Extracting the best MAE from Cross-Validation
+mae_cv <- min(model_gbm$results$MAE)
+
+# 4. Consolidating results and calculating the Percentage Gap
+overfitting_check <- data.frame(
+  Metric = c("Training MAE (Internal)", "Cross-Validation MAE (Generalization)"),
+  Value = c(mae_train_full, mae_cv)
+)
+
+# Calculate the gap as a percentage of the CV MAE
+gap_pct <- ((mae_cv - mae_train_full) / mae_cv) * 100
+
+# 5. Display the table with the percentage insight
+overfitting_check %>%
+  kable(digits = 2, 
+        caption = "GBM Overfitting Diagnostic: Internal vs. CV Performance") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = F) %>%
+  footnote(general = paste0("The performance gap between training and validation is ", 
+                            round(gap_pct, 2), "%. "),
+           general_title = "Analysis: ")
+```
+
+A gap of **28.6%** is considered relatively high in a predictive context.
+This suggests that the GBM, in its effort to minimize the error, has started to "memorize" specific patterns or noise within the `final_train` set that do not translate perfectly to unseen data.
+
+Because a stable and reliable forecast is critical for business planning, we cannot settle for a model with this level of over-adjustment.
+In the **following section**, we will focus on exploring alternative architectures or regularization techniques specifically designed to **reduce this gap**.
+
+Our goal is to find a "sturdier" model that, even if it sacrifices a small amount of training precision, provides a much more consistent performance between internal and external data, ensuring its reliability for future sales predictions.
+
+## Model Hybridization: Blending for Generalization
+
+To mitigate the overfitting observed in the GBM, we implement a **Hybrid Ensemble strategy (Blending)**.
+Instead of relying solely on the complex boosting iterations, we will weight the predictions of the **GBM** against the **Linear Model ("Marvelous Formula")**, which acts as a statistical anchor due to its high stability.
+
+We introduce a stabilization parameter $\beta$ (Beta), where the final prediction is calculated as: $$\text{Final Prediction} = \beta \cdot (\text{GBM}) + (1 - \beta) \cdot (\text{Linear Model})$$
+
+The goal is to find the **"Optimal Beta"** that minimizes the estimated Cross-Validation error while narrowing the gap between internal performance and real-world generalization.
+
+In this analysis, we test a range of $\beta$ values from 0.3 to 0.7 (in increments of 0.05) to determine the ideal balance between boosting precision and linear stability.
+
+```{r}
+# Retraining with savePredictions = "final" allows us to calculate the TRUE hybrid MAE
+cv_settings <- trainControl(
+  method = "repeatedcv", 
+  number = 10, 
+  repeats = 3, 
+  savePredictions = "final" 
+)
+
+set.seed(123)
+model_gbm <- train(
+  Sales ~ ., 
+  data = final_train,
+  method = "gbm",
+  trControl = cv_settings,
+  tuneGrid = gbm_grid,
+  metric = "MAE",
+  verbose = FALSE 
+)
+
+set.seed(123)
+valid_m7 <- train(
+  formula_marvelous, 
+  data = final_train, 
+  method = "lm", 
+  trControl = cv_settings, 
+  metric = "MAE"
+)
+
+# We use inner_join to align predictions by row and resample iteration
+preds_cv_all <- inner_join(
+  model_gbm$pred, 
+  valid_m7$pred, 
+  by = c("rowIndex", "Resample"), 
+  suffix = c(".gbm", ".lm")
+)
+
+# Range of betas
+betas <- seq(0.3 , 0.7, by = 0.05)
+
+# Generate base fit predictions
+pred_gbm_train <- predict(model_gbm, newdata = final_train)
+pred_lm_train  <- predict(model_7_final, newdata = final_train)
+
+sensitivity_analysis <- lapply(betas, function(b) {
+  
+  # MAE on training data
+  pred_train_h = (b * pred_gbm_train) + ((1 - b) * pred_lm_train)
+  mae_train_h  = mean(abs(final_train$Sales - pred_train_h))
+  
+  # Real Cross-Validation MAE
+  pred_cv_h    = (b * preds_cv_all$pred.gbm) + ((1 - b) * preds_cv_all$pred.lm)
+  mae_cv_real  = mean(abs(preds_cv_all$obs.gbm - pred_cv_h))
+  
+  # Overfitting Gap
+  gap_perc = ((mae_cv_real - mae_train_h) / mae_cv_real) * 100
+  
+  data.frame(Beta_GBM = b, 
+             MAE_Train = mae_train_h, 
+             MAE_CV_Real = mae_cv_real, 
+             Overfitting_Gap = gap_perc)
+})
+
+blending_results <- do.call(rbind, sensitivity_analysis)
+
+
+# Display of results
+blending_results %>%
+  kable(digits = 4, 
+        caption = "Hybrid Model Performance: Real CV Accuracy & Error Cancellation",
+        col.names = c("Beta (GBM Weight)", "MAE Train (Fit)", "MAE CV (Real Accuracy)", "Overfitting Gap (%)")) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = F) %>%
+  row_spec(which(abs(blending_results$Beta_GBM - 0.4) < 0.0001), bold = T, background = "#D4E6F1")
+```
+
+We have selected **Beta = 0.4** as the optimal weighting factor for the final ensemble, establishing a 40/60 blend between the GBM and the Linear Model.
+With a limited dataset of $N=117$ observations, this configuration represents the "predictive sweet spot" by balancing raw power with structural stability.
+
+The sensitivity analysis shows that as Beta increases, the **MAE CV follows a "U-shaped" curve**, reaching its lowest point near 0.65.
+However, the **Overfitting Gap increases linearly** alongside it.
+By choosing $\beta = 0.4$, we achieve a real Cross-Validation MAE of **274.92** while maintaining a highly professional **Overfitting Gap of 14.84%**(lower than 15%).
+We intentionally opted for this weight over $\beta = 0.5$ because it offers superior robustness; we sacrifice a marginal gain in precision (only \~4 units of MAE) to secure a significantly more stable model that is less likely to react to noise in such a small sample.
+
+The fact that our real $MAE_{CV}$ is substantially lower than individual model estimates proves the **Error Cancellation Effect**: the structural rigidity of the Linear Model effectively "filters" the GBM's variance, allowing the hybrid architecture to cancel out individual biases and provide a more reliable forecast than either model could achieve alone.
+
+## Final model and predictions
+
+Based on the validated 40/60 weighting, we now consolidate the architecture into the `hybrid_model_final object`.
+This configuration anchors the GBM's predictive power to the Linear Model's stability, ensuring the forecast remains reliable across the 25-week test horizon.
+
+```{r}
+# Defining the final Hybrid Model configuration
+hybrid_model_final <- list(
+  gbm  = model_gbm,
+  lm   = model_7_final,
+  beta = 0.4
+)
+```
+
+To generate the final forecasts, we apply the ensemble logic to the unseen test data.
+We first isolate the predictive features from the temporal identifiers to ensure compatibility with our trained models.
+By calculating the weighted average of the GBM’s non-linear projections and the Linear Model’s structural baseline, we produce a balanced 25-week sales outlook.
+This result is then exported into the required format, pairing each predicted value with its corresponding Monday date to ensure full compliance with the submission standards.
+
+```{r}
+# Isolating features from final_test 
+test_features <- final_test %>% 
+  select(-Monday_date)
+
+# Generate individual predictions
+preds_gbm <- predict(hybrid_model_final$gbm, newdata = test_features)
+preds_lm  <- predict(hybrid_model_final$lm,  newdata = test_features)
+
+# Apply the hybrid formula: (0.4 * GBM) + (0.6 * LM)
+final_sales_forecast <- (hybrid_model_final$beta * preds_gbm) + 
+                        ((1 - hybrid_model_final$beta) * preds_lm)
+
+
+# Ensuring strict compliance with the required format: 25 rows and 2 columns.
+submission_file <- data.frame(
+  "Monday date" = final_test$Monday_date,
+  "Sales" = final_sales_forecast
+)
+
+# Export to CSV 
+write.csv(submission_file, "TeamDiegoAlfonso.csv", row.names = FALSE, quote = FALSE)
+
+# Verification of the 25 required rows
+print(submission_file, row.names = FALSE)
+```
