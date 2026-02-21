@@ -11,17 +11,11 @@ The objective is twofold:
 
 ## Project Structure
 
-.
-├── data/
-│   ├── train.csv
-│   └── test.csv
-├── notebook/
-│   └── TeamName_LastName1_LastName2.ipynb
-├── report/
-│   └── TeamName_LastName1_LastName2.html
-├── TeamName.csv
-├── requirements.txt
-└── README.md
+- `data/` — Dataset in CSV format (`Real_Dataset_HW2`)  
+- `notebook/` — RMarkdown notebooks (also exported to HTML in `report/`)  
+- `report/` — HTML reports generated from notebooks (`Predictive_Modeling_of_Sales_Dynamics.html`)   
+- `requirements.txt` — Python dependencies  
+- `README.md` — Project description and instructions
 
 ## Methodology
 
