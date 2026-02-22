@@ -1,0 +1,447 @@
+---
+title: "Independent Component Analysis and Fisher-Based Image Segmentation"
+subtitle: "Assignment: Statistical Learning"
+author:
+  - Diego Rivera Suárez
+  - Alfonso Delgado Lara
+output: html_document
+date: "January, 2026"
+---
+
+## Introduction
+
+This assignment addresses a real-world problem in dermatological image analysis using techniques related to Independent Component Analysis (ICA) and linear projections. The objective is to explore the internal structure of color image data by identifying projections that maximize class separability, quantified through the Fisher index, after an appropriate whitening transformation.
+
+The image used in this study was selected from the ISIC Archive, a well-known benchmark repository associated with one of the most important international competitions in dermatological image analysis. Specifically, image number 99 from the collection available on the referenced ISIC webpage was chosen for the experiments. This image serves as the basis for all subsequent processing, including data representation, whitening, projection optimization, and segmentation.
+
+The overall methodology consists of transforming the RGB pixel values into a suitable data matrix, applying a whitening transformation to remove second-order dependencies, and then searching for orthogonal projection directions that maximize non-Gaussianity and class separability. The results are analyzed through visualizations of projected images, histograms, and segmentation maps.
+
+## Image loading and visualization
+
+In this section, the dermoscopic image selected from the ISIC Archive is loaded into R using the `jpeg` library. This step enables access to the RGB pixel information required for subsequent analysis.
+
+The image is then visualized using base R graphical functions. The `rasterImage` function is used to display the image while preserving its original spatial arrangement and color composition, allowing for an initial qualitative inspection prior to data transformation and whitening
+
+```{r}
+# Load required library for reading images
+library(jpeg)  
+
+# Read the image 
+img <- readJPEG("ISIC_0000099.jpg")
+
+# Display the original image
+plot(1:2, type = "n", xlab = "", ylab = "", axes = FALSE)
+rasterImage(img, 1, 1, 2, 2)
+
+```
+
+## Data Representation and Whitening
+
+### Data Representation
+
+The RGB image is first transformed into a numerical data matrix suitable for linear algebra operations. Each pixel's color information is represented as a three-dimensional vector corresponding to the Red, Green, and Blue channels. The resulting matrix `X` has rows corresponding to pixels and columns corresponding to color channels, allowing for subsequent multivariate analysis.
+
+```{r}
+# Extract image dimensions: height (h) and width (w)
+h <- dim(img)[1]
+w <- dim(img)[2]
+
+# Initialize a matrix to store RGB values
+X <- matrix(NA, nrow = 3, ncol = h * w)
+
+# Assign each color channel to a row of the matrix
+X[1, ] <- as.vector(img[, , 1])  # Red channel
+X[2, ] <- as.vector(img[, , 2])  # Green channel
+X[3, ] <- as.vector(img[, , 3])  # Blue channel
+
+# Transpose matrix so that rows correspond to pixels and columns to color channels
+X <- t(X)  
+```
+
+### Whitening
+
+Before applying Independent Component Analysis (ICA), the data is whitened to remove second-order correlations. Whitening involves centering the data and transforming it so that the resulting covariance matrix is the identity. This ensures that all directions have equal variance, and differences in projected distributions reflect higher-order statistical properties rather than scale differences.
+
+The whitening matrix is computed from the eigen-decomposition of the covariance matrix. The final whitened data `Z` is obtained by multiplying the centered data by this matrix, providing a standardized representation suitable for ICA and projection-based analysis.
+
+```{r}
+# Center the data by subtracting the mean of each channel
+X_centered <- scale(X, center = TRUE, scale = FALSE)
+
+# Compute the covariance matrix of the centered data
+covX <- cov(X_centered)
+
+# Eigen-decomposition of the covariance matrix
+eig <- eigen(covX)
+
+# Construct the whitening matrix using the inverse square root of eigenvalues
+D_inv_sqrt <- diag(1 / sqrt(eig$values))
+W <- eig$vectors %*% D_inv_sqrt
+
+# Apply the whitening transformation
+Z <- X_centered %*% W
+```
+
+## Projection Optimization Using the Fisher Index
+
+### Fisher Index Function
+
+To evaluate the quality of a given projection, a function `compute_fisher` is defined. This function projects the whitened data onto a specified vector where each pixel is mapped to a single scalar along this direction, and quantifies the separability of the resulting values into two clusters using the Fisher index.
+
+The procedure involves normalization of the projection vector, clustering via k-means, and computation of the Fisher index, which is the squared difference of class means divided by sum of class variances, based on the means and variances of the two classes. The function returns both the Fisher index and the projected data, along with the class labels, enabling subsequent analysis and visualization.
+
+```{r}
+compute_fisher <- function(v, Z) {
+  # Normalize the given projection vector to have unit length
+  v <- v / sqrt(sum(v^2))
+  
+  # Project the whitened data onto the vector v
+  proj <- Z %*% v
+  
+  # k-means clustering with 2 clusters on the projected data
+  km <- kmeans(proj, centers = 2)
+  labels <- km$cluster
+  
+  # 3 Compute the Fisher index
+  mu1 <- mean(proj[labels == 1])
+  mu2 <- mean(proj[labels == 2])
+  sigma1 <- var(proj[labels == 1])
+  sigma2 <- var(proj[labels == 2])
+  
+  fisher_index <- (mu1 - mu2)^2 / (sigma1 + sigma2)
+  
+  # Return the results as a list
+  return(list(fisher_index = fisher_index, proj = proj, labels = labels))
+}  
+
+```
+
+### Grid Search over Spherical Coordinates
+
+Once the Fisher index function is defined, the next step consists of exploring the space of possible projection directions. To this end, the unit sphere in three dimensions is parameterized using spherical coordinates, with angles $\theta$ and $\phi$ . A discrete grid of angles is defined to sample directions uniformly across the sphere.
+
+For each pair of angles, a unit vector is constructed, and the Fisher index of the projection of the whitened data onto this vector is computed. The results are stored in a matrix, enabling subsequent visualization of the Fisher index as a function of the projection direction and identification of the optimal projection.
+
+```{r}
+# Number of steps for azimuth (theta) and elevation (phi)
+n_theta <- 30
+n_phi <- 15
+
+# Sequences of angles covering the sphere
+theta_seq <- seq(0, 2*pi, length.out = n_theta)
+phi_seq <- seq(0, pi, length.out = n_phi)
+
+# Initialize matrix to store Fisher index values
+J_matrix <- matrix(NA, nrow = n_phi, ncol = n_theta)
+
+# Loop over all combinations of phi and theta
+for (i in 1:n_phi) {
+  phi <- phi_seq[i]
+  for (j in 1:n_theta) {
+    theta <- theta_seq[j]
+    
+    # Construct a unit vector v corresponding to the spherical coordinates
+    v <- c(cos(theta)*sin(phi), sin(theta)*sin(phi), cos(phi))
+    
+    # Compute Fisher index for the projection of the whitened data
+    res <- compute_fisher(v, Z)
+    J_matrix[i, j] <- res$fisher_index
+  }
+}
+
+```
+
+### Visualization of the Fisher Index Surface
+
+To identify the optimal projection direction, the computed Fisher index values over the spherical grid are visualized as a three-dimensional surface. The `plotly` library is employed to generate an interactive surface plot, where the x-axis corresponds to the azimuth angle ($\theta$), the y-axis corresponds to the elevation angle ($\phi$), and the z-axis represents the Fisher index. This visualization facilitates the identification of regions on the unit sphere that maximize class separability.
+
+```{r, echo=TRUE, message=FALSE, warning=FALSE}
+library(plotly)
+
+plot_ly(
+  x = theta_seq,    # Azimuth angles
+  y = phi_seq,      # Elevation angles
+  z = J_matrix,     # Fisher index values for each (theta, phi) pair
+  type = "surface"
+) %>%
+  layout(
+    title = "Fisher Index Surface",
+    scene = list(
+      xaxis = list(title = "Theta"),  
+      yaxis = list(title = "Phi"),    
+      zaxis = list(title = "Fisher Index")  # z-axis label
+    )
+  )
+
+```
+
+The surface displays a well-defined maximum, indicating that class separability is strongly concentrated around a limited set of projection directions. However, the repeated arcs and symmetric patterns observed in the plot, also noticeable in the maximum area, reflect the inherent periodicity of the Fisher index with respect to the angular parameters, arising from the trigonometric parametrization of the unit sphere. Equivalent or opposite projection directions are therefore represented multiple times across the angular domain, leading to recurring structures with similar Fisher index values.
+
+### Identification of the Optimal Projection
+
+After computing the Fisher index over the spherical grid, the optimal projection direction is determined by locating the maximum value in the resulting matrix. The corresponding indices are mapped back to the azimuth ($\theta$) and elevation ($\phi$) angles, and a unit vector in three-dimensional space is constructed from these angles. This vector represents the projection that maximizes class separability according to the Fisher index and will be used for subsequent analysis and visualization.
+
+```{r}
+# Find the indices of the maximum Fisher index in the grid
+max_idx <- which(J_matrix == max(J_matrix), arr.ind = TRUE)
+i_max <- max_idx[1]   # row index 
+j_max <- max_idx[2]   # column index 
+
+# Retrieve the angles corresponding to the maximum Fisher index
+theta_max <- theta_seq[j_max]  
+phi_max <- phi_seq[i_max]      
+
+# Construct the unit vector corresponding to the optimal projection
+v_opt <- c(
+  cos(theta_max) * sin(phi_max),
+  sin(theta_max) * sin(phi_max),
+  cos(phi_max)
+)
+
+# Display the optimal projection vector
+v_opt
+```
+
+### Projection and Segmentation Using the Optimal Vector
+
+Once the optimal projection vector (`v_opt`) has been determined, it is applied to the full whitened dataset `Z`. The resulting projected values are then analyzed using a histogram to visualize the distribution along the optimal direction. Finally, the data is segmented into two classes based on the k-means clustering previously computed, and the segmented image is displayed, illustrating how the optimal projection separates the two classes spatially.
+
+```{r}
+# Apply the optimal projection vector to the whitened data
+result_opt <- compute_fisher(v_opt, Z)
+
+# Plot a histogram of the projected values along the optimal direction
+hist(
+  result_opt$proj,       
+  breaks = 50,            
+  main = "Histogram of the Optimal Projection", 
+  xlab = "Projected Value"                       
+)
+
+# Reshape the cluster labels into the original image dimensions for visualization
+seg_img <- matrix(result_opt$labels, nrow = h, ncol = w)
+
+# Display the segmented image, where pixels belonging to different clusters are colored black and white
+image(seg_img, col = c("black", "white"), axes = FALSE)
+
+```
+
+Finally, a projection in grayscale of the data before clustering will also be provided:
+
+```{r}
+proj_img <- matrix(result_opt$proj, nrow = h, ncol = w)
+
+image(
+  proj_img, 
+  col = gray.colors(256), 
+  axes = FALSE, 
+  main = "Projected Image (Grayscale)"
+)
+```
+
+## Finding the Second Orthogonal Projection
+
+Having successfully identified the **first projection vector** (`v1`), which captures the most dominant feature of the image (the global separation between the lesion and the healthy skin), the next layer of information is now extracted. In the context of **Independent Component Analysis (ICA)**, it is crucial that the subsequent components represent distinct, non-redundant features. Therefore, an **orthogonality constraint** is imposed, requiring the second vector (`v2`) to be perpendicular to the first one.
+
+To achieve this computationally, searching the entire **3D sphere** again is not necessary. Instead, the search space is reduced to the **plane orthogonal** to `v1`. Geometrically, `v1` acts as the **normal vector**, and the optimization is conducted along the "equator" defined by this plane. A single angle `alpha` (from 0 to $2\pi$) is iterated through to find the specific direction within this subspace that maximizes the **Fisher Index**, thereby revealing secondary structural details such as **borders** or **pigment variations**.
+
+```{r}
+library(pracma)
+
+# We rename as v1 to the optimal vector found in the previous stage
+v1 <- v_opt
+
+# We choose now any random vector that is not parallel to v1.
+tmp <- c(1,0,0)
+if (abs(sum(tmp*v1)) > 0.99) tmp <- c(0,1,0)
+
+# We construct the first orthogonal vector to v1, u1, by removing its projection
+# into the subspace <v1>.
+u1 <- tmp - sum(tmp*v1)*v1        
+u1 <- u1 / sqrt(sum(u1^2))        
+
+# The second orthogonal vector will be obtained simply using the cross product
+u2 <- cross(v1, u1)       
+
+```
+
+Once the two orthogonal vectors `u1` and `u2` that define the plane perpendicular to the first component have been established, the search for the **optimal second projection** is performed. A sequence of angles (`theta_seq`) is iterated through to scan this "equatorial" circle. For each step, a candidate vector `v2` is constructed as a **linear combination** of the basis vectors and its **Fisher index** is computed. Finally, the angle corresponding to the maximum index (`theta_max`) is identified to determine the **optimal orthogonal directio**n `v2_opt`.
+
+```{r}
+# We subdivide the angles space for doing the grid search
+theta_seq <- seq(0, 2*pi, length.out = 50)
+J_values <- numeric(length(theta_seq))
+
+# We iterate for each of the possible theta values
+for (i in 1:length(theta_seq)) {
+  theta <- theta_seq[i]
+  
+  # The vector in which we will be calculating the Fisher index will be:
+  v2 <- cos(theta)*u1 + sin(theta)*u2
+  
+  # We calculate the Fisher index and add it to our value list:
+  res <- compute_fisher(v2, Z)   
+  J_values[i] <- res$fisher_index
+}
+
+# We finally can calculate the optimal vector:
+idx_max <- which.max(J_values)
+theta_max <- theta_seq[idx_max]
+v2_opt <- cos(theta_max)*u1 + sin(theta_max)*u2
+print(v2_opt)
+
+```
+
+### Visualization of the results
+
+Since the search is now restricted to a circle (one degree of freedom), the visualization simplifies from a 3D surface to a 2D curve. The plot below displays the Fisher Index values as a function of the angle **theta** along the orthogonal plane. A periodic behavior is expected to be observed, where the maximum peak corresponds to the optimal direction `v2_opt` that maximizes the separation in this new subspace.
+
+```{r}
+library(plotly)
+
+# We create a dataset for making the plotting process easier
+df_plot <- data.frame(Theta = theta_seq, Fisher = J_values)
+
+# We also look for the maximum inside this new dataframe
+max_point <- df_plot[which.max(df_plot$Fisher), ]
+
+plot_ly() %>% # We plot all the points
+  add_trace(
+    data = df_plot,
+    x = ~Theta,
+    y = ~Fisher,
+    type = 'scatter',
+    mode = 'lines',
+    line = list(color = 'blue', width = 3),
+    name = 'Fisher Index Curve'
+  ) %>% # We add a red point in the maximum
+  add_trace(
+    x = max_point$Theta,
+    y = max_point$Fisher,
+    type = 'scatter',
+    mode = 'markers',
+    marker = list(color = 'red', size = 12, symbol = 'x'),
+    name = 'Max Value'
+  ) %>% # And give format to the axis
+  layout(
+    title = "Fisher Index Optimization (Orthogonal Circle)",
+    xaxis = list(title = "Angle Theta (radians)"),
+    yaxis = list(title = "Fisher Index Value"),
+    showlegend = TRUE
+  )
+```
+
+As a next step, the projections of all the points into this second component will be visualized:
+
+```{r}
+result_v2 <- compute_fisher(v2_opt, Z)
+
+hist(result_v2$proj, breaks = 50, main="Histogram of the second projection", xlab="Projected value")
+```
+
+The **projected values** are then reshaped into the original image dimensions ($h \times w$) and visualized in **grayscale**. Unlike the first component, which typically isolates the main object, this **second projection** highlights structural details, such as the lesion's borders or specific textural patterns, providing complementary information to the segmentation.
+
+```{r}
+# Project the full data onto the optimal second vector
+proj_values_2 <- Z %*% v2_opt
+
+# Reshape into a matrix with original dimensions
+proj_img_2 <- matrix(proj_values_2, nrow = h, ncol = w)
+
+# Plot in grayscale
+image(
+  t(proj_img_2)[, nrow(proj_img_2):1],
+  col = gray.colors(256),
+  axes = FALSE,
+  main = "2nd Optimal Projection (Structure)"
+)
+```
+
+To further emphasize that this second projection highlights the structural details of the lesion, the segmentation plot in black and white of the image will be done.
+
+```{r}
+seg_img2 <- matrix(result_v2$labels, nrow = h, ncol = w)
+image(seg_img2, col=c("black","white"), axes=FALSE)
+
+```
+
+## The Third Orthogonal Projection
+
+Finally, the third projection is identified. Since the data lies in a 3D space (RGB) and two mutually orthogonal vectors have already been established, the direction of the third vector is mathematically determined. Consequently, there is no need for further optimization; the third vector (`v3`) is simply computed as the **cross product** of the first two. This final component captures the remaining information orthogonal to the previous layers, often revealing subtle **internal structures** or **noise patterns** that provide insight into the texture of the lesion.
+
+```{r}
+v3 <- cross(v1, v2_opt)
+v3 <- v3 / sqrt(sum(v3^2))  
+
+print(v3)
+
+result_v3 <- compute_fisher(v3, Z)
+```
+
+### Visualization of the results
+
+The **histogram** containing the **projections** of all points onto this **third orthogonal component** is analyzed first.
+
+```{r}
+hist(result_v3$proj, breaks = 50, main="Histograma of the third component", xlab="Value of the projection")
+```
+
+These projections are now examined on the original image. This grayscale image reveals high-frequency details, such as subtle pigment networks or noise, which were not captured by the first two orthogonal components and correspond to the "internal structure" of the lesion.
+
+```{r}
+# Project the full data onto the third vector 
+proj_values_3 <- Z %*% v3
+
+# Reshape into a matrix with original dimensions
+proj_img_3 <- matrix(proj_values_3, nrow = h, ncol = w)
+
+# Plot in grayscale
+image(
+  t(proj_img_3)[, nrow(proj_img_3):1],
+  col = gray.colors(256),
+  axes = FALSE,
+  main = "3rd Projection (Internal Structure)"
+)
+```
+
+Finally, the cluster labels obtained from the clustering algorithm are reshaped into the original image dimensions to visualize the segmentation mask. This binary image displays the classification of pixels based on the third projection, effectively isolating the fine **internal structures** or noise that remain after removing the first two dominant components.
+
+```{r}
+seg_img3 <- matrix(result_v3$labels, nrow = h, ncol = w)
+image(seg_img3, col=c("black","white"), axes=FALSE)
+```
+
+## Conclusion
+
+To summarize the effectiveness of the analysis, a **False Color Composite** image was constructed by assigning each of the three independent components found to a specific RGB channel. This visualization allows the observation of how the different layers of information interact spatially:
+
+```{r}
+p1 <- Z %*% v1 
+p2 <- Z %*% v2_opt
+p3 <- Z %*% v3     
+
+norm_01 <- function(x) { (x - min(x)) / (max(x) - min(x)) }
+
+img_false_color <- array(0, dim=dim(img))
+
+
+img_false_color[,,1] <- matrix(norm_01(p3), nrow=nrow(img)) 
+img_false_color[,,2] <- matrix(norm_01(p2), nrow=nrow(img)) 
+img_false_color[,,3] <- matrix(norm_01(p1), nrow=nrow(img))   
+
+plot(0:1, 0:1, type="n", axes=FALSE, xlab="", ylab="", main="False Color Composite")
+rasterImage(img_false_color, 0, 0, 1, 1)
+```
+
+-   **The Green Channel (1st Projection):** This component acts as the primary **segmentation mask**. In the composite image, it defines the main "body" of the lesion, effectively separating the pigmented area from the surrounding skin.
+-   **The Blue Channel (2nd Projection):** This projection appears to capture the **background skin** and the transitional borders. The greenish tint in the surrounding area suggests that this component models the healthy skin tone and the immediate halo of the lesion.
+-   **The Red Channel (3rd Projection):** This is perhaps the most clinically interesting component. We can observe distinct **pinkish/reddish patterns** and dots inside the lesion. These correspond to the **internal structures** (such as pigment network or globules) that were extracted by the third projection vector, revealing high-frequency details that define the lesion's texture.
+
+### Final Remarks
+
+Through this project, it has been demonstrated that **Independent Component Analysis (ICA)** combined with the maximization of the **Fisher Index** is a powerful unsupervised method for medical image analysis. Unlike standard RGB observation, this change of basis enabled the following:
+
+1.  **Decorrelate color information**: The whitening process removed the linear dependencies between channels, allowing for visualization beyond the surface color.
+2.  **Isolate features hierarchically**: The problem was successfully separated into three orthogonal sub-problems: segmenting the "shape" (Blue), analyzing the "skin/context" (Green), and inspecting the "internal detail" (Red).
+
+From a practical perspective, this approach is highly valuable. By separating the image into shape, border, and texture, details often invisible to the naked eye are revealed. Ultimately, this mathematical technique facilitates the analysis of the mole's features, providing a clearer view that can serve as a great support for medical decision-making.

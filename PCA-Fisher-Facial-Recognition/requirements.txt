@@ -1,0 +1,10 @@
+# R Environment Requirements
+# Use install_packages.R to install these dependencies
+
+R>=4.1.0
+tidyverse>=2.0.0
+caret>=6.0
+Matrix>=1.5
+jpeg>=0.1
+knitr>=1.40
+rmarkdown>=2.20

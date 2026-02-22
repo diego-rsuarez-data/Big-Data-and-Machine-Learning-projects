@@ -1,0 +1,21 @@
+# Unstructured Data / Images 
+data/raw/
+*.jpg
+*.jpeg
+*.png
+*.pgm
+
+# Data and R objects
+*.csv
+*.rds
+*.RData
+
+# R and RStudio environment
+.Rhistory
+.Ruserdata
+.Rproj.user/
+*.Rproj
+
+# OS generated files
+.DS_Store
+Thumbs.db

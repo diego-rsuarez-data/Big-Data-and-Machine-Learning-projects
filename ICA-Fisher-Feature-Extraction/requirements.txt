@@ -1,0 +1,10 @@
+# R Environment Requirements
+# Advanced Feature Extraction & ICA Pipeline
+
+R>=4.1.0
+fastICA>=1.2-3
+MASS>=7.3
+jpeg>=0.1-10
+tidyverse>=2.0.0
+rmarkdown>=2.20
+knitr>=1.40

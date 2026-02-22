@@ -1,6 +1,12 @@
-pandas
-numpy
-matplotlib
-seaborn
-scikit-learn
-jupyter
+# R Environment Requirements
+# Predictive Modeling of Sales Dynamics
+
+R>=4.1.0
+tidyverse>=2.0.0
+tidymodels>=1.0.0
+lubridate>=1.9.0
+forecast>=8.21
+xgboost>=1.7.0
+randomForest>=4.7
+rmarkdown>=2.20
+knitr>=1.40
