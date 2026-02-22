@@ -1,0 +1,15 @@
+# Core Big Data Processing
+pyspark>=3.3.0
+findspark>=2.0.1
+
+# Data Manipulation & Serialization
+pandas>=1.5.0
+pyarrow>=10.0.1  
+
+# Data Visualization
+matplotlib>=3.6.0
+seaborn>=0.12.0
+
+# Jupyter Environment
+jupyter>=1.0.0
+notebook>=6.5.0

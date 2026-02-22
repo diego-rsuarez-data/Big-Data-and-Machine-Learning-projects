@@ -1,0 +1,28 @@
+# Data and datasets
+data/
+*.parquet
+*.csv
+*.json
+*.snappy
+
+# Apache Spark and Hadoop
+spark-warehouse/
+metastore_db/
+logs/
+*.crc
+derby.log
+
+# Python and virtual environments
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+env/
+.env
+
+# Jupyter Notebooks
+.ipynb_checkpoints/
+
+# OS generated files
+.DS_Store
+Thumbs.db
