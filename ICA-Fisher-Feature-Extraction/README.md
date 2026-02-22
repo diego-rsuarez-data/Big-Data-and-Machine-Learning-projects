@@ -12,12 +12,10 @@ This project demonstrates advanced **Blind Source Separation (BSS)** and feature
 * **Signal Reconstruction:** Reconstructs the isolated components into distinct analytical layers, proving the ability to decompose complex data structures into actionable features.
 
 ## Project Structure
-├── data/               # Original complex unstructured arrays (Ignored in Git)
-├── notebooks/
-│   └── 01_ica_fisher_extraction_pipeline.Rmd
-├── reports/
-│   └── project2_statistical_learning.html 
-├── requirements.txt         # R dependencies (fastICA, MASS, tidyverse)
-├── .gitignore
-└── README.md
+
+- `data/` — Dataset in CSV/Image format used for signal source separation.
+- `notebook/` — RMarkdown notebook implementing the ICA and Fisher mathematical framework.
+- `report/` — HTML report (`project2_statistical_learning.html`) with technical breakdowns.
+- `requirements.txt` — List of R dependencies (fastICA, MASS, tidyverse).
+- `README.md` — Project description and instructions
 

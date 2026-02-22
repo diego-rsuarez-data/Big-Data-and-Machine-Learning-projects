@@ -7,15 +7,12 @@ A lightweight, from-scratch facial authentication system using Statistical Machi
 `R` | `PCA (Eigenfaces)` | `FDA (Fisherfaces)` | `KNN` | `Computer Vision`
 
 ## Project Structure
-├── data/
-│   ├── Training/            # Database of known faces (Registered identities)
-│   └── Testing2/            # External faces to test intruder detection
-├── notebooks/
-│   └── 01_facial_recognition_pipeline.Rmd
-├── requirements.txt         # R dependencies (tidyverse, caret, Matrix, jpeg)
-├── install_packages.R       # Environment setup script
-├── .gitignore               # Ignores image datasets and R temporary files
-└── README.md
+
+- `data/` — Facial images organized in `Training/` and `Testing2/` (external/intruders).
+- `notebook/` — RMarkdown notebook (`facial_recognition_pipeline.Rmd`) implementing the mathematical core.
+- `report/` — HTML report with performance metrics and distance distribution plots.
+- `requirements.txt` — List of R dependencies (caret, tidyverse, Matrix, jpeg).
+- `README.md` — Project description and instructions.
 
 ## Algorithm Highlights
 * **PCA (Eigenfaces):** Reduces the high dimensionality of flattened image matrices, preserving maximum variance while filtering out background noise.
