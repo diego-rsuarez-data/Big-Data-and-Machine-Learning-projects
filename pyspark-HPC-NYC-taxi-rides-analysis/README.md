@@ -7,7 +7,7 @@ This project develops a high-performance computing framework using **Apache Spar
 The objective is to leverage distributed computing to process large-scale data efficiently and extract key urban mobility insights, including:
 - Average speed of taxis in terms of the hour of the day.
 - Identification of the most common taxi trips (routing patterns).
-- Analysis of financial records (fare amounts, tips, passengers, etc.).
+- Analysis of financial records (tips, passengers, etc.).
 
 ## Project Structure
 
@@ -33,7 +33,7 @@ The objective is to leverage distributed computing to process large-scale data e
 - Aggregation of massive data using `reduceByKey` (e.g., calculating total speed and count of trips per hour).
 
 ### 4. Exploratory Data Analysis & Benchmarking
-- Analysis of traffic dynamics and economic efficiency (e.g., average income per minute).
+- Analysis of traffic dynamics and economic efficiency
 - Execution time tracking to benchmark computational performance.
 - Comparison of performance between Spark RDDs, DataFrames, and native SQL queries.
 
